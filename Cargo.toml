@@ -1,0 +1,33 @@
+[package]
+name = "trafficengine"
+version = "0.1.0"
+authors = ["Rainer Stademann <rainer.stademann@silverengine.de>"]
+
+[lib]
+name = "traffic_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "trafficengine"
+path = "src/bin.rs"
+
+
+[dependencies]
+e2d2 = { path = "../../gitclones/NetBricks/framework", features = ["performance"] }
+#e2d2 = { git = "https://github.com/rstade/NetBricks", branch = "e2d2-0-1-1" }
+rand = "0.3"
+fnv = "*"
+log = "0.4"
+env_logger = "0.5"
+nix = "0.10.0"
+ctrlc = { version = "~3", features = ["termination"] }
+time = ">=0.1.0"
+ipnet = "1.0"
+toml = "0.4"
+serde = "1.0"
+serde_derive = "1.0"
+eui48 = { version= "0.3", features=["serde"] }
+error-chain = "0.11"
+
+[features]
+
