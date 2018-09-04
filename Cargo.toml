@@ -24,10 +24,12 @@ ctrlc = { version = "~3", features = ["termination"] }
 time = ">=0.1.0"
 ipnet = "1.0"
 toml = "0.4"
+separator =  ">= 0.3"
 serde = "1.0"
 serde_derive = "1.0"
 eui48 = { version= "0.3", features=["serde"] }
 error-chain = "0.11"
+uuid = { version = "0.6", features = ["v4"] }
 
 [features]
 

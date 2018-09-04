@@ -22,22 +22,20 @@ use ipnet::Ipv4Net;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
-use e2d2::interface::PmdPort;
 use e2d2::interface::PortQueue;
 use e2d2::scheduler::initialize_system;
-use e2d2::scheduler::StandaloneScheduler;
+use e2d2::scheduler::{StandaloneScheduler, SchedulerCommand};
 use e2d2::allocators::CacheAligned;
 
 use traffic_lib::Connection;
-use traffic_lib::nftcp::setup_kni;
-use traffic_lib::read_proxy_config;
+use traffic_lib::read_config;
 use traffic_lib::get_mac_from_ifname;
-use traffic_lib::print_hard_statistics;
 use traffic_lib::setup_pipelines;
 use traffic_lib::Container;
 use traffic_lib::L234Data;
 use traffic_lib::MessageFrom;
 use traffic_lib::spawn_recv_thread;
+use std::sync::mpsc::SyncSender;
 
 #[test]
 fn delayed_binding_proxy() {
@@ -57,9 +55,9 @@ fn delayed_binding_proxy() {
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
 
-    let proxy_config = read_proxy_config(toml_file).unwrap();
+    let configuration = read_config(toml_file).unwrap();
 
-    if proxy_config.queries.is_none() {
+    if configuration.queries.is_none() {
         error!("missing parameter 'queries' in configuration file");
         std::process::exit(1);
     };
@@ -85,7 +83,7 @@ fn delayed_binding_proxy() {
 
     let opts = basic_opts();
 
-    let args: Vec<String> = vec!["proxyengine", "-f", toml_file]
+    let args: Vec<String> = vec!["trafficengine", "-f", toml_file]
         .iter()
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
@@ -93,10 +91,10 @@ fn delayed_binding_proxy() {
         Ok(m) => m,
         Err(f) => panic!(f.to_string()),
     };
-    let mut configuration = read_matches(&matches, &opts);
+    let mut netbricks_configuration = read_matches(&matches, &opts);
 
-    let l234data: Vec<L234Data> = proxy_config
-        .servers
+    let l234data: Vec<L234Data> = configuration
+        .targets
         .iter()
         .map(|srv_cfg| L234Data {
             mac: srv_cfg
@@ -108,7 +106,7 @@ fn delayed_binding_proxy() {
         })
         .collect();
 
-    let proxy_config_cloned = proxy_config.clone();
+    let config_cloned = configuration.clone();
 
     // this is the closure, which selects the target server to use for a new TCP connection
     let f_select_server = move |c: &mut Connection| {
@@ -117,7 +115,7 @@ fn delayed_binding_proxy() {
         let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
         let remainder = stars % l234data.len();
         c.server = Some(l234data[remainder].clone());
-        info!("selecting {}", proxy_config_cloned.servers[remainder].id);
+        info!("selecting {}", config_cloned.targets[remainder].id);
         // initialize userdata
         if let Some(_) = c.userdata {
             c.userdata.as_mut().unwrap().init();
@@ -128,70 +126,39 @@ fn delayed_binding_proxy() {
 
     // this is the closure, which may modify the payload of client to server packets in a TCP connection
     let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {
-        /*
-        if let IResult::Done(_, c_tag) = parse_tag(payload) {
-            let userdata: &mut MyData = &mut c.userdata
-                .as_mut()
-                .unwrap()
-                .mut_userdata()
-                .downcast_mut()
-                .unwrap();
-            userdata.c2s_count += payload.len();
-            debug!(
-                "c->s (tailroom { }, {:?}): {:?}",
-                tailroom,
-                userdata,
-                c_tag,
-            );
-        }
 
-        unsafe {
-            let payload_sz = payload.len(); }
-            let p_payload= payload[0] as *mut u8;
-            process_payload(p_payload, payload_sz, tailroom);
-        } */
     };
 
-    match initialize_system(&mut configuration) {
+    match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
 
-            let proxy_config_cloned = proxy_config.clone();
+            let config_cloned = configuration.clone();
             let mtx_clone=mtx.clone();
             let boxed_fss = Arc::new(f_select_server);
             let boxed_fpp = Arc::new(f_process_payload_c_s);
 
             context.add_pipeline_to_run(
-                Box::new(move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                setup_pipelines(core, p, s, &proxy_config_cloned, boxed_fss.clone(), boxed_fpp.clone(), mtx_clone.clone());}
+                Box::new(move |
+                    core: i32,
+                    p: HashSet<CacheAligned<PortQueue>>,
+                    s: &mut StandaloneScheduler,
+                | {
+                setup_pipelines(
+                    core,
+                    p,
+                    s,
+                    &config_cloned,
+                    boxed_fss.clone(),
+                    boxed_fpp.clone(),
+                    mtx_clone.clone());}
                 )
             );
-            spawn_recv_thread(mrx);
-            context.execute();
-
-            // set up kni
-            debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
-            for port in context.ports.values() {
-                debug!(
-                    "port {}:{} -- mac_address= {}",
-                    port.port_type(),
-                    port.port_id(),
-                    port.mac_address()
-                );
-                if port.is_kni() {
-                    setup_kni(
-                        port.linux_if().unwrap(),
-                        &proxy_config.proxy.ipnet,
-                        &proxy_config.proxy.mac,
-                        &proxy_config.proxy.namespace,
-                    );
-                }
-            }
 
             // set up servers
-            for server in proxy_config.servers {
+            for server in configuration.targets.clone() {
                 let target_port = server.port; // moved into thread
                 let target_ip = server.ip;
                 let id = server.id;
@@ -212,15 +179,18 @@ fn delayed_binding_proxy() {
                 });
             }
 
+            spawn_recv_thread(mrx, context, configuration.clone());
+
+
             thread::sleep(Duration::from_millis(2000 as u64)); // wait for the servers
 
             // emulate clients
 
             let timeout = Duration::from_millis(1000 as u64);
 
-            for ntry in 0..proxy_config.queries.unwrap() {
+            for ntry in 0..configuration.queries.unwrap() {
                 match TcpStream::connect_timeout(
-                    &SocketAddr::from((proxy_config.proxy.ipnet.parse::<Ipv4Net>().unwrap().addr(), proxy_config.proxy.port)),
+                    &SocketAddr::from((configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(), configuration.engine.port)),
                     timeout,
                 ) {
                     Ok(mut stream) => {
@@ -250,11 +220,6 @@ fn delayed_binding_proxy() {
             }
 
             thread::sleep(Duration::from_millis(500)); // Sleep for a bit
-            print_hard_statistics(1u16);
-            for port in context.ports.values() {
-                println!("Port {}:{}", port.port_type(), port.port_id());
-                port.print_soft_statistics();
-            }
 
             info!("terminating ProxyEngine ...");
             mtx.send(MessageFrom::Exit).unwrap();
