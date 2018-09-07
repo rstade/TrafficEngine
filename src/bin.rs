@@ -101,48 +101,9 @@ pub fn main() {
                 .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
             ip: u32::from(srv_cfg.ip),
             port: srv_cfg.port,
-            server_id: srv_cfg.id.clone(),
+            //server_id: srv_cfg.id.clone(),
         })
         .collect();
-
-    // this is the closure, which selects the target server to use for a new TCP connection
-    let f_select_server = move |c: &mut Connection| {
-        let remainder = c.get_client_sock().port().rotate_right(1) as usize % l234data.len();
-        c.server = Some(l234data[remainder].clone());
-        // info!("selecting {}", proxy_config_cloned.servers[remainder].id);
-        // initialize userdata
-        if let Some(_) = c.userdata {
-            c.userdata.as_mut().unwrap().init();
-        } else {
-            c.userdata = Some(Container::new());
-        }
-    };
-
-    // this is the closure, which may modify the payload of client to server packets in a TCP connection
-    let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {
-        /*
-        if let IResult::Done(_, c_tag) = parse_tag(payload) {
-            let userdata: &mut MyData = &mut c.userdata
-                .as_mut()
-                .unwrap()
-                .mut_userdata()
-                .downcast_mut()
-                .unwrap();
-            userdata.c2s_count += payload.len();
-            debug!(
-                "c->s (tailroom { }, {:?}): {:?}",
-                tailroom,
-                userdata,
-                c_tag,
-            );
-        }
-
-        unsafe {
-            let payload_sz = payload.len(); }
-            let p_payload= payload[0] as *mut u8;
-            process_payload(p_payload, payload_sz, tailroom);
-        } */
-    };
 
     fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
         for port in context.ports.values() {
@@ -169,9 +130,6 @@ pub fn main() {
                 let (mtx, mrx) = channel::<MessageFrom>();
 
                 let config_cloned = configuration.clone();
-                let boxed_fss = Arc::new(f_select_server);
-                let boxed_fpp = Arc::new(f_process_payload_c_s);
-
                 let mtx_clone = mtx.clone();
 
                 context.add_pipeline_to_run(
@@ -182,8 +140,7 @@ pub fn main() {
                                         p,
                                         s,
                                         &config_cloned,
-                                        boxed_fss.clone(),
-                                        boxed_fpp.clone(),
+                                        l234data.clone(),
                                         mtx_clone.clone());
                     })
                 );

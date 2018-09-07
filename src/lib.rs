@@ -265,17 +265,14 @@ pub fn print_xstatistics(port_id: u16) -> i32 {
     len
 }
 
-pub fn setup_pipelines<F1, F2>(
+pub fn setup_pipelines(
     core: i32,
     ports: HashSet<CacheAligned<PortQueue>>,
     sched: &mut StandaloneScheduler,
     configuration: &Configuration,
-    f_select_server: Arc<F1>,
-    f_process_payload_c_s: Arc<F2>,
+    servers: Vec<L234Data>,
     tx: Sender<MessageFrom>,
-) where
-    F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
-    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
+)
 {
     let mut kni: Option<&CacheAligned<PortQueue>> = None;
     let mut pci: Option<&CacheAligned<PortQueue>> = None;
@@ -327,8 +324,7 @@ pub fn setup_pipelines<F1, F2>(
         kni.unwrap(),
         sched,
         configuration,
-        f_select_server,
-        f_process_payload_c_s,
+        servers,
         tx,
     );
 }
@@ -356,10 +352,10 @@ pub enum TaskType {
 
 pub enum MessageFrom {
     Channel(PipelineId, Sender<MessageTo>),
-    CRecord(ConRecord),
-    ClientSyn(ConRecord),
-    Established(ConRecord),
-    GenTimeStamp(PipelineId, u64, u64), // generator timestamps : pipeline, count of sent syn, tsc-value
+    CRecord(PipelineId, ConRecord),
+    ClientSyn(PipelineId, ConRecord),
+    Established(PipelineId, ConRecord),
+    GenTimeStamp(PipelineId, u64, u64, u64), // generator timestamps : pipeline, count of sent syn, tsc-value
     StartGenerator,
     Task(PipelineId, Uuid, TaskType),
     PrintPerformance(Vec<i32>), // performance for the cores selected by the indices
@@ -450,7 +446,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     */
                     break;
                 }
-                Ok(MessageFrom::CRecord(con_record)) => {
+                Ok(MessageFrom::CRecord(pipe, con_record)) => {
                     /* info!(
                         "CRecord: pipe {}, p_port= {}, hold = {:6} ms, s-setup = {:6} us, {}, c/s_state = {:?}/{:?}, rc = {:?}",
                         con_record.pipeline_id,
@@ -463,19 +459,19 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                         con_record.get_release_cause(),
                     );*/
                 }
-                Ok(MessageFrom::ClientSyn(con_record)) => {
+                Ok(MessageFrom::ClientSyn(pipe, con_record)) => {
                     info!(
-                        "ClientSyn: pipe {}: p_port= {}, c-sock={}",
-                        con_record.pipeline_id, con_record.p_port, con_record.client_sock,
+                        "ClientSyn: pipe {}: p_port= {}",
+                        pipe, con_record.p_port,
                     );
                 }
-                Ok(MessageFrom::Established(con_record)) => {
+                Ok(MessageFrom::Established(pipe, con_record)) => {
                     info!(
-                        "pipe {}: Established -> {}, c-sock={},  s-setup = {:6} us",
-                        con_record.pipeline_id,
+                        // "pipe {}: Established -> {}, c-sock={},  s-setup = {:6} us",
+                        "pipe {}: Established -> {} ",
+                        pipe,
                         con_record.server_id,
-                        con_record.client_sock,
-                        duration_to_micros(&(con_record.s_ack_sent - con_record.s_syn_sent)),
+//                        duration_to_micros(&(con_record.s_ack_sent - con_record.s_syn_sent)),
                     );
                 }
                 Ok(MessageFrom::StartGenerator) => {
@@ -499,11 +495,12 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);
                     tasks[task_type as usize].push((pipeline_id, uuid));
                 }
-                Ok(MessageFrom::GenTimeStamp(pipeline_id, syn_count, tsc)) => info!(
-                    "pipe {}: GenTimeStamp -> syn_count= {}, tsc= {}",
+                Ok(MessageFrom::GenTimeStamp(pipeline_id, syn_count, tsc0, tsc1)) => info!(
+                    "pipe {}: GenTimeStamp -> count= {}, tsc0= {}, tsc1= {}",
                     pipeline_id,
                     syn_count,
-                    tsc.separated_string()
+                    tsc0.separated_string(),
+                    tsc1.separated_string(),
                 ),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => {

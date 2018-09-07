@@ -102,32 +102,13 @@ fn delayed_binding_proxy() {
                 .unwrap_or(get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
             ip: u32::from(srv_cfg.ip),
             port: srv_cfg.port,
-            server_id: srv_cfg.id.clone(),
+            //server_id: srv_cfg.id.clone(),
         })
         .collect();
 
     let config_cloned = configuration.clone();
 
     // this is the closure, which selects the target server to use for a new TCP connection
-    let f_select_server = move |c: &mut Connection| {
-        let s = String::from_utf8(c.payload.to_vec()).unwrap();
-        // read first item in string and convert to usize:
-        let stars: usize = s.split(" ").next().unwrap().parse().unwrap();
-        let remainder = stars % l234data.len();
-        c.server = Some(l234data[remainder].clone());
-        info!("selecting {}", config_cloned.targets[remainder].id);
-        // initialize userdata
-        if let Some(_) = c.userdata {
-            c.userdata.as_mut().unwrap().init();
-        } else {
-            c.userdata = Some(Container::new());
-        }
-    };
-
-    // this is the closure, which may modify the payload of client to server packets in a TCP connection
-    let f_process_payload_c_s = |_c: &mut Connection, _payload: &mut [u8], _tailroom: usize| {
-
-    };
 
     match initialize_system(&mut netbricks_configuration) {
         Ok(mut context) => {
@@ -137,8 +118,6 @@ fn delayed_binding_proxy() {
 
             let config_cloned = configuration.clone();
             let mtx_clone=mtx.clone();
-            let boxed_fss = Arc::new(f_select_server);
-            let boxed_fpp = Arc::new(f_process_payload_c_s);
 
             context.add_pipeline_to_run(
                 Box::new(move |
@@ -151,8 +130,7 @@ fn delayed_binding_proxy() {
                     p,
                     s,
                     &config_cloned,
-                    boxed_fss.clone(),
-                    boxed_fpp.clone(),
+                    l234data.clone(),
                     mtx_clone.clone());}
                 )
             );

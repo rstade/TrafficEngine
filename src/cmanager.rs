@@ -32,7 +32,7 @@ pub struct L234Data {
     pub mac: MacAddress,
     pub ip: u32,
     pub port: u16,
-    pub server_id: String,
+    // pub server_id: String,
 }
 
 pub trait UserData: Send + Sync + 'static {
@@ -54,39 +54,25 @@ pub enum ReleaseCause {
 #[derive(Clone)]
 pub struct ConRecord {
     pub p_port: u16,
-    pub client_sock: SocketAddrV4,
-    pub pipeline_id: PipelineId,
-    /// timestamp of SYN
-    pub c_syn_recv: Instant,
-    /// timestamp of client Ack in 3way handshake
-    pub c_ack_recv: Instant,
-    /// timestamp of SYN towards server in 3way handshake
-    pub s_syn_sent: Instant,
-    /// timestamp of Ack towards server in 3way handshake
-    pub s_ack_sent: Instant,
     /// holding time
-    pub con_hold: Duration,
+//    pub con_hold: Duration,
     pub c_state: TcpState,
     pub s_state: TcpState,
-    pub server_id: String,
+    pub server_id: u32,
     release_cause: ReleaseCause,
 }
 
 impl ConRecord {
-    fn init(&mut self, proxy_sport: u16, client_sock: SocketAddrV4) {
-        self.c_syn_recv = Instant::now();
-        self.c_ack_recv = self.c_syn_recv;
-        self.s_syn_sent = self.c_syn_recv;
-        self.s_ack_sent = self.c_syn_recv;
+    #[inline]
+    fn init(&mut self, proxy_sport: u16) {
         self.p_port = proxy_sport;
-        self.client_sock = client_sock;
         self.c_state = TcpState::Listen;
         self.s_state = TcpState::Closed;
-        self.server_id.clear();
+        self.server_id= 0;
     }
     #[inline]
     pub fn c_released(&mut self, cause: ReleaseCause) {
-        self.con_hold = self.c_syn_recv.elapsed();
+//        self.con_hold = self.c_syn_recv.elapsed();
         self.release_cause = cause;
     }
     #[inline]
@@ -96,56 +82,35 @@ impl ConRecord {
 
     fn new(pipeline_id: PipelineId) -> ConRecord {
         ConRecord {
-            client_sock: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
-            c_syn_recv: Instant::now(),
-            c_ack_recv: Instant::now(),
-            s_syn_sent: Instant::now(),
-            s_ack_sent: Instant::now(),
-            con_hold: Duration::default(),
+//            con_hold: Duration::default(),
             c_state: TcpState::Listen,
             s_state: TcpState::Closed,
-            server_id: String::new(),
+            server_id: 0,
             release_cause: ReleaseCause::Unknown,
             p_port: 0u16,
-            pipeline_id,
         }
     }
 }
 
+#[derive(Clone)]
 pub struct Connection {
-    pub payload: Box<Vec<u8>>,
-    pub server: Option<L234Data>,
-    pub userdata: Option<Box<UserData>>,
-    //Box makes the trait object sizeable
-    pub client_mac: MacHeader,
     pub con_rec: ConRecord,
     /// c_seqn is seqn for connection to client,
     /// after the SYN-ACK from the target server it is the delta to be added to server seqn
     /// see 'server_synack_received'
     pub c_seqn: u32,
-    /// number of bytes inserted by proxy in connection from client to server
-    pub c2s_inserted_bytes: usize,
 }
 
 impl Connection {
-    fn initialize(&mut self, client_sock: SocketAddrV4, proxy_sport: u16) {
-        self.payload.clear();
-        self.server = None;
-        self.userdata = None;
-        self.client_mac = MacHeader::default();
+    #[inline]
+    fn initialize(&mut self, proxy_sport: u16) {
         self.c_seqn = 0;
-        self.c2s_inserted_bytes = 0;
-        self.con_rec.init(proxy_sport, client_sock);
+        self.con_rec.init(proxy_sport);
     }
 
     fn new(pipeline_id: PipelineId) -> Connection {
         Connection {
-            payload: Box::new(Vec::with_capacity(1500)),
-            server: None,
-            userdata: None,
-            client_mac: MacHeader::default(),
             c_seqn: 0,
-            c2s_inserted_bytes: 0,
             con_rec: ConRecord::new(pipeline_id),
         }
     }
@@ -153,19 +118,19 @@ impl Connection {
     #[inline]
     pub fn client_con_established(&mut self) {
         self.con_rec.c_state = TcpState::Established;
-        self.con_rec.c_ack_recv = Instant::now();
+//        self.con_rec.c_ack_recv = Instant::now();
     }
 
     #[inline]
     pub fn server_syn_sent(&mut self) {
         self.con_rec.s_state = TcpState::SynReceived;
-        self.con_rec.s_syn_sent = Instant::now();
+//        self.con_rec.s_syn_sent = Instant::now();
     }
 
     #[inline]
     pub fn server_con_established(&mut self) {
         self.con_rec.s_state = TcpState::Established;
-        self.con_rec.s_ack_sent = Instant::now();
+//        self.con_rec.s_ack_sent = Instant::now();
     }
 
     #[inline]
@@ -178,15 +143,6 @@ impl Connection {
         self.con_rec.p_port = port;
     }
 
-    #[inline]
-    pub fn get_client_sock(&self) -> &SocketAddrV4 {
-        &self.con_rec.client_sock
-    }
-
-    #[inline]
-    pub fn set_client_sock(&mut self, client_sock: SocketAddrV4) {
-        self.con_rec.client_sock = client_sock;
-    }
 }
 
 impl fmt::Display for Connection {
@@ -201,12 +157,6 @@ impl fmt::Display for Connection {
     }
 }
 
-impl Clone for Connection {
-    fn clone(&self) -> Self {
-        Connection::new(self.con_rec.pipeline_id.clone())
-    }
-}
-
 pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub struct ConnectionManager {
@@ -215,6 +165,7 @@ pub struct ConnectionManager {
     timeouts: Timeouts,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
     me: L234Data,
+    pipeline_id: PipelineId,
     tcp_port_base: u16,
 }
 
@@ -238,6 +189,7 @@ impl ConnectionManager {
             timeouts: Timeouts::default_or_some(&me_config.engine.timeouts),
             pci,
             me,
+            pipeline_id,
             tcp_port_base,
         };
         // need to add last port this way to avoid overflow with slice, when max_tcp_port == 65535
@@ -305,7 +257,7 @@ impl ConnectionManager {
             None
         }
     }
-
+/*
     fn get_timeouts(&mut self, now: &Instant, wheel: &mut TimerWheel<u16>) -> Vec<u16> {
         let mut con_timeouts: Vec<u16> = Vec::new();
         let resolution = wheel.get_resolution();
@@ -342,26 +294,19 @@ impl ConnectionManager {
         }
         con_timeouts
     }
+*/
 
     // create a new connection, if out of resources return None
-    pub fn create(&mut self, wheel: &mut TimerWheel<u16>) -> Option<&mut Connection> {
+    pub fn create(&mut self) -> Option<&mut Connection> {
         let opt_port = self.free_ports.pop_front();
         if opt_port.is_some() {
             let port = opt_port.unwrap();
-            let now;
             {
                 let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
                 assert_eq!(cc.p_port(), 0);
-                let s = SocketAddrV4::new(Ipv4Addr::from(self.me.ip), port);
-                cc.initialize(s, port);
-                now = cc.con_rec.c_syn_recv;
+                cc.initialize(port);
                 debug!("tcp flow created on port {:?}", port);
             }
-            let port_vec = self.get_timeouts(&now, wheel);
-            if self.timeouts.established.unwrap() < wheel.get_max_timeout_millis() {
-                wheel.schedule(&(now + Duration::from_millis(self.timeouts.established.unwrap())), port);
-            }
-            self.release_ports(port_vec);
             Some(self.get_mut_con(&port))
         } else {
             warn!("out of ports");
@@ -393,7 +338,7 @@ impl ConnectionManager {
     pub fn send_all_c_records(&self, tx: &Sender<MessageFrom>) {
         for c in &self.port2con {
             if c.p_port() != 0 {
-                tx.send(MessageFrom::CRecord(c.con_rec.clone())).unwrap();
+                tx.send(MessageFrom::CRecord(self.pipeline_id.clone(), c.con_rec.clone())).unwrap();
             }
         }
     }

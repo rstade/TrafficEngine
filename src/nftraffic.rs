@@ -9,6 +9,7 @@ use e2d2::queues::{new_mpsc_queue_pair, MpscProducer};
 use e2d2::headers::EndOffset;
 use e2d2::common::EmptyMetadata;
 use e2d2::utils;
+use e2d2::native::zcsi::{ mbuf_alloc_bulk, MBuf};
 
 use std::sync::Arc;
 use std::cmp::min;
@@ -23,7 +24,6 @@ use uuid::Uuid;
 
 use rand;
 use cmanager::*;
-use timer_wheel::TimerWheel;
 use Configuration;
 use {PipelineId, MessageFrom, MessageTo, TaskType};
 use std::sync::mpsc::SyncSender;
@@ -128,24 +128,32 @@ pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns:
     info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
 }
 
-#[derive(Clone)]
 pub struct PacketInjector {
     mac: MacHeader,
     ip: IpHeader,
     tcp: TcpHeader,
+    packet_prototype: Packet<TcpHeader, EmptyMetadata>,
     producer: MpscProducer,
+    tx: Sender<MessageFrom>,
     no_batches: u32,
     sent_batches: u32,
-    tx: Sender<MessageFrom>,
+    used_cycles: Vec<u64>,
+    pipeline_id: PipelineId,
 }
+
 
 pub const PRIVATE_ETYPE_TAG: u16 = 0x08FF;
 
 impl PacketInjector {
     // by setting no_batches=0 batch creation is unlimited
-    pub fn new(producer: MpscProducer, hd_src_data: &L234Data, no_batches: u32, tx: Sender<MessageFrom>) -> PacketInjector {
+    pub fn new(
+        producer: MpscProducer,
+        hd_src_data: &L234Data,
+        no_batches: u32,
+        pipeline_id: PipelineId,
+        tx: Sender<MessageFrom>,
+    ) -> PacketInjector {
         let mut mac = MacHeader::new();
-        // TODO revisit which fields we really need to initialize here!
         mac.src = hd_src_data.mac.clone();
         mac.set_etype(PRIVATE_ETYPE_TAG); // mark this through an unused ethertype as an internal frame, will be re-written later in the pipeline
         let mut ip = IpHeader::new();
@@ -160,31 +168,42 @@ impl PacketInjector {
         tcp.set_syn_flag();
         tcp.set_src_port(hd_src_data.port);
         tcp.set_data_offset(5);
+        let packet_prototype = new_packet()
+            .unwrap()
+            .push_header(&mac)
+            .unwrap()
+            .push_header(&ip)
+            .unwrap()
+            .push_header(&tcp)
+            .unwrap();
+
         PacketInjector {
             mac,
             ip,
             tcp,
+            packet_prototype,
             producer,
             no_batches,
-            tx,
             sent_batches: 0,
+            used_cycles: vec![0;4],
+            pipeline_id,
+            tx,
         }
     }
 
     #[inline]
-    fn initialize_packet(&self, pkt: Packet<NullHeader, EmptyMetadata>) -> Packet<TcpHeader, EmptyMetadata> {
-        pkt.push_header(&self.mac)
-            .unwrap()
-            .push_header(&self.ip)
-            .unwrap()
-            .push_header(&self.tcp)
-            .unwrap()
+    pub fn create_packet(&mut self) -> Packet<TcpHeader, EmptyMetadata> {
+        //let begin = utils::rdtsc_unsafe();
+        let p = unsafe { self.packet_prototype.copy() };
+        //self.used_cycles += (utils::rdtsc_unsafe() - begin);
+        p
     }
 
     #[inline]
-    pub fn create_packet(&mut self) -> Packet<TcpHeader, EmptyMetadata> {
-        let p = self.initialize_packet(new_packet().unwrap());
-        self.tcp.incr_src_port();
+    pub fn create_packet_from_mbuf(&mut self, mbuf: *mut MBuf) -> Packet<TcpHeader, EmptyMetadata> {
+        //let begin = utils::rdtsc_unsafe();
+        let p = unsafe { self.packet_prototype.copy_use_mbuf(mbuf) };
+        //self.used_cycles += (utils::rdtsc_unsafe() - begin);
         p
     }
 }
@@ -193,35 +212,49 @@ impl Executable for PacketInjector {
     fn execute(&mut self) -> u32 {
         let mut count = 0;
         if self.no_batches == 0 || self.sent_batches < self.no_batches {
-            for _ in 0..16 {
-                let p = self.create_packet();
-                self.producer.enqueue_one(p);
+            let begin = utils::rdtsc_unsafe();
+            let mut mbuf_ptr_array= Vec::<* mut MBuf>::with_capacity(16 as usize);
+            let ret = unsafe { mbuf_alloc_bulk(mbuf_ptr_array.as_mut_ptr(), 16) };
+            assert_eq!(ret, 0);
+            unsafe { mbuf_ptr_array.set_len(16) };
+            self.used_cycles[1] += (utils::rdtsc_unsafe() - begin);
+            for i in 0..16 {
+                let p = self.create_packet_from_mbuf(mbuf_ptr_array[i]);
+                //self.producer.enqueue_one(p);
                 count += 1;
             }
+            self.producer.enqueue_mbufs(&mbuf_ptr_array);
             self.sent_batches += 1;
+            if self.sent_batches == self.no_batches {
+                self.used_cycles[0] += (utils::rdtsc_unsafe() - begin);
+                self.tx.send(MessageFrom::GenTimeStamp(
+                    self.pipeline_id.clone(),
+                    self.sent_batches as u64,
+                    self.used_cycles[0],
+                    self.used_cycles[1],
+                )).unwrap();
+            }
+            else { self.used_cycles[0] += (utils::rdtsc_unsafe() - begin) };
         }
         count
     }
 }
 
-pub fn setup_generator<F1, F2>(
+pub fn setup_generator(
     core: i32,
     pci: &CacheAligned<PortQueue>,
     kni: &CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
     configuration: &Configuration,
-    f_select_server: Arc<F1>,
-    f_process_payload_c_s: Arc<F2>,
+    servers: Vec<L234Data>,
     tx: Sender<MessageFrom>,
-) where
-    F1: Fn(&mut Connection) + Sized + Send + Sync + 'static,
-    F2: Fn(&mut Connection, &mut [u8], usize) + Sized + Send + Sync + 'static,
-{
+) {
     let me = L234Data {
         mac: MacAddress::parse_str(&configuration.engine.mac).unwrap(),
         ip: u32::from(configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr()),
         port: configuration.engine.port,
-        server_id: "TrafficEngine".to_string(),
+        //TODO change server_id to u32, performance!
+        // server_id: "TrafficEngine".to_string(),
     };
 
     let pipeline_id = PipelineId {
@@ -232,7 +265,6 @@ pub fn setup_generator<F1, F2>(
     debug!("enter setup_generator {}", pipeline_id);
 
     let mut sm: ConnectionManager = ConnectionManager::new(pipeline_id.clone(), pci.clone(), me.clone(), configuration.clone());
-    let mut wheel = TimerWheel::new(128, 16, 128);
 
     // setting up a a reverse message channel between this pipeline and the main program thread
     debug!("setting up reverse channel from pipeline {}", pipeline_id);
@@ -307,16 +339,19 @@ pub fn setup_generator<F1, F2>(
         uuid_l2groupby_clone,
     );
     // we create SYN packets and merge them with the upstream from the pci i/f
+    let tx_clone = tx.clone();
     let (producer, consumer) = new_mpsc_queue_pair();
-    let creator = PacketInjector::new(producer, &me, 512, tx.clone());
+    let creator = PacketInjector::new(producer, &me, 512, pipeline_id.clone(), tx_clone.clone());
     let mut syn_counter = 0u64;
+    let mut cycles: Vec<u64> = vec![0, 0, 0];
+
     let uuid = Uuid::new_v4();
     let name = String::from("PacketInjector");
     sched.add_runnable(Runnable::from_task(uuid, name, creator).unready());
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid, TaskType::TcpGenerator))
         .unwrap();
 
-    let tx_clone = tx.clone();
+
     let pipeline_id_clone = pipeline_id.clone();
 
     let l2_input_stream = merge(vec![consumer.compose(), l2groups.get_group(1).unwrap().compose()]);
@@ -342,6 +377,7 @@ pub fn setup_generator<F1, F2>(
                 }
 
                 impl<'a> HeaderState<'a> {
+                    #[inline]
                     fn set_server_socket(&mut self, ip: u32, port: u16) {
                         self.ip.set_dst(ip);
                         self.tcp.set_dst_port(port);
@@ -374,56 +410,14 @@ pub fn setup_generator<F1, F2>(
                     h.tcp.set_ack_num(ack_num);
                 }
 
-                fn set_header(c: &mut Connection, h: &mut HeaderState, me: &L234Data) {
-                    if c.server.is_none() {
-                        error!("no server set: {}", c);
-                    }
-                    h.mac.set_dmac(&c.server.as_ref().unwrap().mac);
+                #[inline]
+                fn set_header(server: &L234Data, port: u16, h: &mut HeaderState, me: &L234Data) {
+                    h.mac.set_dmac(&server.mac);
                     h.mac.set_smac(&me.mac);
-                    let l2l3 = &c.server.as_ref().unwrap();
-                    h.set_server_socket(l2l3.ip, l2l3.port);
+                    h.set_server_socket(server.ip, server.port);
                     h.ip.set_src(me.ip);
-                    h.tcp.set_src_port(c.p_port());
+                    h.tcp.set_src_port(port);
                     h.ip.update_checksum();
-                }
-
-                fn server_to_client<M: Sized + Send>(
-                    // we will need p once s->c payload inspection is required
-                    _p: &mut Packet<TcpHeader, M>,
-                    c: &mut Connection,
-                    h: &mut HeaderState,
-                    pd: &L234Data,
-                ) {
-                    // this is the s->c part of the stable two-way connection state
-                    // translate packets and forward to client
-                    h.mac.set_dmac(&c.client_mac.src);
-                    h.mac.set_smac(&pd.mac);
-                    let ip_server = h.ip.src();
-                    h.ip.set_dst(u32::from(*c.get_client_sock().ip()));
-                    h.ip.set_src(pd.ip);
-                    let server_src_port = h.tcp.src_port();
-                    h.tcp.set_src_port(pd.port);
-                    h.tcp.set_dst_port(c.get_client_sock().port());
-                    h.tcp.update_checksum_incremental(server_src_port, pd.port);
-                    h.tcp.update_checksum_incremental(c.p_port(), c.get_client_sock().port());
-                    h.tcp.update_checksum_incremental(
-                        !finalize_checksum(ip_server),
-                        !finalize_checksum(u32::from(*c.get_client_sock().ip())),
-                    );
-                    // adapt seqn and ackn from server packet
-                    let oldseqn = h.tcp.seq_num();
-                    let newseqn = oldseqn.wrapping_add(c.c_seqn);
-                    let oldackn = h.tcp.ack_num();
-                    let newackn = oldackn.wrapping_sub(c.c2s_inserted_bytes as u32);
-                    if c.c2s_inserted_bytes != 0 {
-                        h.tcp.set_ack_num(newackn);
-                        h.tcp
-                            .update_checksum_incremental(!finalize_checksum(oldackn), !finalize_checksum(newackn));
-                    }
-                    h.tcp.set_seq_num(newseqn);
-                    h.tcp
-                        .update_checksum_incremental(!finalize_checksum(oldseqn), !finalize_checksum(newseqn));
-                    //debug!("translated s->c: {}", p);
                 }
 
                 #[inline]
@@ -446,119 +440,89 @@ pub fn setup_generator<F1, F2>(
                     update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
                 }
 
-                fn generate_syn<M: Sized + Send, F>(
+                #[inline]
+                fn generate_syn<M: Sized + Send>(
                     p: &mut Packet<TcpHeader, M>,
                     c: &mut Connection,
                     h: &mut HeaderState,
                     me: &L234Data,
-                    f_select_server: &Arc<F>,
+                    servers: &Vec<L234Data>,
                     tx: &Sender<MessageFrom>,
                     pipeline_id: &PipelineId,
                     syn_counter: &mut u64,
-                ) where
-                    F: Fn(&mut Connection),
-                {
+                ) {
                     h.mac.set_etype(0x0800); // overwrite private ethertype tag
-                    f_select_server(c);
-                    // save server_id to connection record
-                    c.con_rec.server_id = if c.server.is_some() {
-                        c.server.as_ref().unwrap().server_id.clone()
-                    } else {
-                        String::from("<unselected>")
-                    };
-                    set_header(c, h, me);
+                    c.con_rec.server_id = 0;
+                    set_header(&servers[0], c.p_port(), h, me);
+
                     //generate seq number:
-                    c.c_seqn = rand::random::<u32>();
+                    //TODO find more efficient method than random
+                    //c.c_seqn = rand::random::<u32>();  //too expensive
+                    c.c_seqn = 123456;
                     h.tcp.set_seq_num(c.c_seqn);
                     h.tcp.set_syn_flag();
                     h.tcp.set_window_size(5840); // 4* MSS(1460)
                     h.tcp.set_ack_num(0u32);
                     h.tcp.unset_ack_flag();
                     h.tcp.unset_psh_flag();
+
                     update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
                     unsafe {
                         *syn_counter += 1;
-                        if syn_counter.bitand(1023u64) == 0 {
-                            tx.send(MessageFrom::GenTimeStamp(pipeline_id.clone(), *syn_counter, utils::rdtsc_unsafe()))
-                                .unwrap();
+                        if syn_counter.bitand(1023u64) == 0 || *syn_counter == 1u64 {
+                            tx.send(MessageFrom::GenTimeStamp(
+                                pipeline_id.clone(),
+                                *syn_counter,
+                                utils::rdtsc_unsafe(),
+                                0,
+                            )).unwrap();
                         }
                         if syn_counter.bitand(8191u64) == 0 {
-                            tx.send(MessageFrom::PrintPerformance(vec![pipeline_id.core as i32]));
+                            tx.send(MessageFrom::PrintPerformance(vec![pipeline_id.core as i32])).unwrap();
                         }
                     }
 
                     debug!("SYN packet to server - L3: {}, L4: {}", h.ip, p.get_header());
                 }
 
-                /*
-                let pipe_id = pipeline_id.clone();
-                loop {
-                    match rx.try_recv() {
-                        Ok(MessageTo::Exit) => {
-                            sm.send_all_c_records(&tx);
-                            debug!("{}: exiting recv task", pipe_id);
-                        }
-                        Err(TryRecvError::Disconnected) => {
-                            error!("{}: tried to receive from disconnected message channel", pipe_id);
-                            break;
-                        }
-                        Err(TryRecvError::Empty) => break, // nothing in queue
-                    };
-                }
-*/
+                let begin = utils::rdtsc_unsafe();
                 let mut group_index = 0usize; // the index of the group to be returned
 
                 assert!(p.get_pre_header().is_some()); // we must have parsed the headers
                 assert!(p.get_pre_pre_header().is_some()); // we must have parsed the headers
 
-                let hs_ip;
-                let hs_mac;
-                let hs_tcp;
-
                 // converting to raw pointer avoids to borrow mutably from p
-                let ptr = p.get_mut_pre_header().unwrap() as *mut IpHeader;
-                unsafe {
-                    hs_ip = &mut *ptr;
-                }
-                let ptr = p.get_mut_pre_pre_header().unwrap() as *mut MacHeader;
-                unsafe {
-                    hs_mac = &mut *ptr;
-                }
-                let ptr = p.get_mut_header() as *mut TcpHeader;
-                unsafe {
-                    hs_tcp = &mut *ptr;
-                }
-
                 let mut hs = HeaderState {
-                    mac: hs_mac,
-                    ip: hs_ip,
-                    tcp: hs_tcp,
+                    ip: unsafe { &mut *(p.get_mut_pre_header().unwrap() as *mut IpHeader) },
+                    mac: unsafe { &mut *(p.get_mut_pre_pre_header().unwrap() as *mut MacHeader) },
+                    tcp: unsafe { &mut *(p.get_mut_header() as *mut TcpHeader) },
                 };
 
                 // if set by the following tcp state machine,
                 // the port/connection becomes released afterwards
                 // this is cumbersome, but we must make the  borrow checker happy
                 let mut release_connection = None;
-
                 // check if we got a packet from generator
                 if hs.mac.etype() == PRIVATE_ETYPE_TAG {
-                    let opt_c = sm.create(&mut wheel);
+                    let opt_c = sm.create();
+                    cycles[1] += (utils::rdtsc_unsafe() - begin);
                     if opt_c.is_some() {
                         let c = opt_c.unwrap();
-                        generate_syn(
-                            p,
-                            c,
-                            &mut hs,
-                            &me,
-                            &f_select_server,
-                            &tx_clone,
-                            &pipeline_id_clone,
-                            &mut syn_counter,
-                        );
+                        generate_syn(p, c, &mut hs, &me, &servers, &tx_clone, &pipeline_id_clone, &mut syn_counter);
                         c.con_rec.c_state = TcpState::SynSent;
                         c.con_rec.s_state = TcpState::SynReceived;
                     };
                     group_index = 1;
+                    cycles[0] += (utils::rdtsc_unsafe() - begin);
+                    if syn_counter.bitand(1023u64) == 0 || syn_counter == 1u64 {
+                        tx_clone
+                            .send(MessageFrom::GenTimeStamp(
+                                pipeline_id_clone.clone(),
+                                syn_counter,
+                                cycles[0],
+                                cycles[1],
+                            )).unwrap();
+                    }
                 } else {
                     // check that flow steering worked:
                     assert!(sm.owns_tcp_port(hs.tcp.dst_port()));
@@ -574,7 +538,9 @@ pub fn setup_generator<F1, F2>(
                             group_index = 1;
                             if (c.con_rec.s_state == TcpState::SynReceived) {
                                 c.server_con_established();
-                                tx_clone.send(MessageFrom::Established(c.con_rec.clone())).unwrap();
+                                tx_clone
+                                    .send(MessageFrom::Established(pipeline_id_clone.clone(), c.con_rec.clone()))
+                                    .unwrap();
                                 debug!(
                                     "established two-way client server connection, SYN-ACK received: L3: {}, L4: {}",
                                     hs.ip, hs.tcp
@@ -596,7 +562,7 @@ pub fn setup_generator<F1, F2>(
                                 debug!(
                                     "server closes connection on port {}/{} in state {:?}",
                                     hs.tcp.dst_port(),
-                                    c.get_client_sock().port(),
+                                    c.p_port(),
                                     c.con_rec.s_state,
                                 );
                                 c.con_rec.s_state = TcpState::FinWait;
@@ -620,20 +586,12 @@ pub fn setup_generator<F1, F2>(
                             b_unexpected = true; //  except we revise it, see below
                         }
 
-                        // once we established a two-way e-2-e connection, we always forward server side packets
-                        if old_s_state >= TcpState::Established && old_c_state >= TcpState::Established {
-                            // translate packets and forward to client
-                            server_to_client(p, &mut c, &mut hs, &me);
-                            group_index = 1;
-                            b_unexpected = false;
-                        }
-
                         if b_unexpected {
                             warn!(
                                 "{} unexpected server side TCP packet on port {}/{} in client/server state {:?}/{:?}, sending to KNI i/f",
                                 thread_id_2,
                                 hs.tcp.dst_port(),
-                                c.get_client_sock().port(),
+                                c.p_port(),
                                 c.con_rec.c_state,
                                 c.con_rec.s_state,
                             );
@@ -652,7 +610,9 @@ pub fn setup_generator<F1, F2>(
                     debug!("releasing port {}", sport);
                     let con_rec = sm.release_port(sport);
                     if con_rec.is_some() {
-                        tx_clone.send(MessageFrom::CRecord(con_rec.unwrap())).unwrap()
+                        tx_clone
+                            .send(MessageFrom::CRecord(pipeline_id_clone.clone(), con_rec.unwrap()))
+                            .unwrap()
                     };
                 }
                 do_ttl(&mut hs);
