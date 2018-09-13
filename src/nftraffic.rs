@@ -2,33 +2,28 @@ use e2d2::operators::*;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
 use e2d2::native::zcsi::rte_kni_handle_request;
-use e2d2::headers::{NullHeader, IpHeader, MacHeader, TcpHeader};
+use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::*;
-use e2d2::utils::{finalize_checksum, ipv4_extract_flow};
+use e2d2::utils::ipv4_extract_flow;
 use e2d2::queues::{new_mpsc_queue_pair, MpscProducer};
 use e2d2::headers::EndOffset;
 use e2d2::common::EmptyMetadata;
 use e2d2::utils;
-use e2d2::native::zcsi::{ mbuf_alloc_bulk, MBuf};
+use e2d2::native::zcsi::{mbuf_alloc_bulk, MBuf};
 
 use std::sync::Arc;
-use std::cmp::min;
-use std::net::{Ipv4Addr, SocketAddrV4};
 use std::process::Command;
-use std::sync::mpsc::{channel, Sender, TryRecvError};
-use std::ops::BitAnd;
+use std::sync::mpsc::Sender;
 
 use eui48::MacAddress;
 use ipnet::Ipv4Net;
 use uuid::Uuid;
 
-use rand;
 use cmanager::*;
 use Configuration;
-use {PipelineId, MessageFrom, MessageTo, TaskType};
-use std::sync::mpsc::SyncSender;
+use {PipelineId, MessageFrom, TaskType};
 
-const MIN_FRAME_SIZE: usize = 60; // without fcs
+//const MIN_FRAME_SIZE: usize = 60; // without fcs
 
 pub struct KniHandleRequest {
     pub kni_port: Arc<PmdPort>,
@@ -128,10 +123,8 @@ pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns:
     info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
 }
 
+#[allow(dead_code)]
 pub struct PacketInjector {
-    mac: MacHeader,
-    ip: IpHeader,
-    tcp: TcpHeader,
     packet_prototype: Packet<TcpHeader, EmptyMetadata>,
     producer: MpscProducer,
     tx: Sender<MessageFrom>,
@@ -144,6 +137,7 @@ pub struct PacketInjector {
 
 pub const PRIVATE_ETYPE_TAG: u16 = 0x08FF;
 
+#[allow(dead_code)]
 impl PacketInjector {
     // by setting no_batches=0 batch creation is unlimited
     pub fn new(
@@ -157,7 +151,7 @@ impl PacketInjector {
         mac.src = hd_src_data.mac.clone();
         mac.set_etype(PRIVATE_ETYPE_TAG); // mark this through an unused ethertype as an internal frame, will be re-written later in the pipeline
         let mut ip = IpHeader::new();
-        ip.set_src(u32::from(hd_src_data.ip));
+        ip.set_src(hd_src_data.ip);
         ip.set_ttl(128);
         ip.set_version(4);
         ip.set_protocol(6); //tcp
@@ -178,14 +172,11 @@ impl PacketInjector {
             .unwrap();
 
         PacketInjector {
-            mac,
-            ip,
-            tcp,
             packet_prototype,
             producer,
             no_batches,
             sent_batches: 0,
-            used_cycles: vec![0;4],
+            used_cycles: vec![0; 4],
             pipeline_id,
             tx,
         }
@@ -212,36 +203,39 @@ impl Executable for PacketInjector {
     fn execute(&mut self) -> u32 {
         let mut count = 0;
         if self.no_batches == 0 || self.sent_batches < self.no_batches {
-            let begin = utils::rdtsc_unsafe();
-            let mut mbuf_ptr_array= Vec::<* mut MBuf>::with_capacity(16 as usize);
+            //let begin = utils::rdtsc_unsafe();
+            let mut mbuf_ptr_array = Vec::<*mut MBuf>::with_capacity(16 as usize);
             let ret = unsafe { mbuf_alloc_bulk(mbuf_ptr_array.as_mut_ptr(), 16) };
             assert_eq!(ret, 0);
             unsafe { mbuf_ptr_array.set_len(16) };
-            self.used_cycles[1] += (utils::rdtsc_unsafe() - begin);
+            //self.used_cycles[1] += utils::rdtsc_unsafe() - begin;
             for i in 0..16 {
-                let p = self.create_packet_from_mbuf(mbuf_ptr_array[i]);
-                //self.producer.enqueue_one(p);
+                self.create_packet_from_mbuf(mbuf_ptr_array[i]);
                 count += 1;
             }
             self.producer.enqueue_mbufs(&mbuf_ptr_array);
             self.sent_batches += 1;
+            /*
             if self.sent_batches == self.no_batches {
-                self.used_cycles[0] += (utils::rdtsc_unsafe() - begin);
+                self.used_cycles[0] += utils::rdtsc_unsafe() - begin;
                 self.tx.send(MessageFrom::GenTimeStamp(
                     self.pipeline_id.clone(),
                     self.sent_batches as u64,
                     self.used_cycles[0],
                     self.used_cycles[1],
                 )).unwrap();
-            }
-            else { self.used_cycles[0] += (utils::rdtsc_unsafe() - begin) };
+            } else { self.used_cycles[0] += utils::rdtsc_unsafe() - begin };
+            */
         }
         count
     }
 }
 
+#[allow(dead_code)]
+#[allow(unused_variables)]
 pub fn setup_generator(
     core: i32,
+    no_batches: u32, //# of batches to create per pipeline
     pci: &CacheAligned<PortQueue>,
     kni: &CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
@@ -264,13 +258,23 @@ pub fn setup_generator(
     };
     debug!("enter setup_generator {}", pipeline_id);
 
-    let mut sm: ConnectionManager = ConnectionManager::new(pipeline_id.clone(), pci.clone(), me.clone(), configuration.clone());
+    let mut sm: ConnectionManager = ConnectionManager::new(
+        pipeline_id.clone(),
+        pci.clone(),
+        me.clone(),
+//        configuration.clone(),
+        tx.clone(),
+    );
+    // some counters for the packet pipeline closures
+    let mut syn_counter = 0u64;         // counts the generated SYN packets
+    let mut packet_counter_1 = 0u64;    // counts all packets processed by pipeline
+    let mut packet_counter_2 = 0u64;
 
     // setting up a a reverse message channel between this pipeline and the main program thread
-    debug!("setting up reverse channel from pipeline {}", pipeline_id);
-    let (remote_tx, rx) = channel::<MessageTo>();
+    // debug!("setting up reverse channel from pipeline {}", pipeline_id);
+    // let (remote_tx, rx) = channel::<MessageTo>();
     // we send the transmitter to the remote receiver of our messages
-    tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
+    // tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
     // forwarding frames coming from KNI to PCI, if we are the kni core
     if is_kni_core(pci) {
@@ -341,16 +345,16 @@ pub fn setup_generator(
     // we create SYN packets and merge them with the upstream from the pci i/f
     let tx_clone = tx.clone();
     let (producer, consumer) = new_mpsc_queue_pair();
-    let creator = PacketInjector::new(producer, &me, 512, pipeline_id.clone(), tx_clone.clone());
+    let creator = PacketInjector::new(producer, &me, no_batches, pipeline_id.clone(), tx_clone.clone());
     let mut syn_counter = 0u64;
-    let mut cycles: Vec<u64> = vec![0, 0, 0];
+    let mut packet_counter_1 = 0u64;
+    let mut packet_counter_2 = 0u64;
+//    let mut cycles: Vec<u64> = vec![0, 0, 0];
 
     let uuid = Uuid::new_v4();
     let name = String::from("PacketInjector");
     sched.add_runnable(Runnable::from_task(uuid, name, creator).unready());
-    tx.send(MessageFrom::Task(pipeline_id.clone(), uuid, TaskType::TcpGenerator))
-        .unwrap();
-
+    tx.send(MessageFrom::Task(pipeline_id.clone(), uuid, TaskType::TcpGenerator)).unwrap();
 
     let pipeline_id_clone = pipeline_id.clone();
 
@@ -419,14 +423,14 @@ pub fn setup_generator(
                     h.tcp.set_src_port(port);
                     h.ip.update_checksum();
                 }
-
+/*
                 #[inline]
                 pub fn tcpip_payload_size<M: Sized + Send>(p: &Packet<TcpHeader, M>) -> u16 {
                     let iph = p.get_pre_header().unwrap();
                     // payload size = ip total length - ip header length -tcp header length
                     iph.length() - (iph.ihl() as u16) * 4u16 - (p.get_header().data_offset() as u16) * 4u16
                 }
-
+*/
                 fn server_synack_received<M: Sized + Send>(
                     p: &mut Packet<TcpHeader, M>,
                     c: &mut Connection,
@@ -450,10 +454,19 @@ pub fn setup_generator(
                     tx: &Sender<MessageFrom>,
                     pipeline_id: &PipelineId,
                     syn_counter: &mut u64,
+                    no_batches: &u32,
                 ) {
                     h.mac.set_etype(0x0800); // overwrite private ethertype tag
                     c.con_rec.server_id = 0;
                     set_header(&servers[0], c.p_port(), h, me);
+                    if *syn_counter == 0u64 {
+                        tx.send(MessageFrom::GenTimeStamp(
+                            pipeline_id.clone(),
+                            *syn_counter,
+                            utils::rdtsc_unsafe(),
+                            0,
+                        )).unwrap();
+                    }
 
                     //generate seq number:
                     //TODO find more efficient method than random
@@ -467,25 +480,22 @@ pub fn setup_generator(
                     h.tcp.unset_psh_flag();
 
                     update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
-                    unsafe {
-                        *syn_counter += 1;
-                        if syn_counter.bitand(1023u64) == 0 || *syn_counter == 1u64 {
-                            tx.send(MessageFrom::GenTimeStamp(
-                                pipeline_id.clone(),
-                                *syn_counter,
-                                utils::rdtsc_unsafe(),
-                                0,
-                            )).unwrap();
-                        }
-                        if syn_counter.bitand(8191u64) == 0 {
-                            tx.send(MessageFrom::PrintPerformance(vec![pipeline_id.core as i32])).unwrap();
-                        }
+                    *syn_counter += 1;
+                    let trigger_count=(*no_batches*16) as u64;
+                    if *syn_counter == trigger_count {
+                        tx.send(MessageFrom::GenTimeStamp(
+                            pipeline_id.clone(),
+                            *syn_counter,
+                            utils::rdtsc_unsafe(),
+                            0,
+                        )).unwrap();
+                        tx.send(MessageFrom::PrintPerformance(vec![pipeline_id.core as i32])).unwrap();
                     }
 
                     debug!("SYN packet to server - L3: {}, L4: {}", h.ip, p.get_header());
                 }
 
-                let begin = utils::rdtsc_unsafe();
+//                let begin = utils::rdtsc_unsafe();
                 let mut group_index = 0usize; // the index of the group to be returned
 
                 assert!(p.get_pre_header().is_some()); // we must have parsed the headers
@@ -505,16 +515,18 @@ pub fn setup_generator(
                 // check if we got a packet from generator
                 if hs.mac.etype() == PRIVATE_ETYPE_TAG {
                     let opt_c = sm.create();
-                    cycles[1] += (utils::rdtsc_unsafe() - begin);
+//                    cycles[1] += utils::rdtsc_unsafe() - begin;
                     if opt_c.is_some() {
                         let c = opt_c.unwrap();
-                        generate_syn(p, c, &mut hs, &me, &servers, &tx_clone, &pipeline_id_clone, &mut syn_counter);
+                        generate_syn(p, c, &mut hs, &me, &servers, &tx_clone, &pipeline_id_clone, &mut syn_counter, &no_batches);
                         c.con_rec.c_state = TcpState::SynSent;
                         c.con_rec.s_state = TcpState::SynReceived;
                     };
                     group_index = 1;
-                    cycles[0] += (utils::rdtsc_unsafe() - begin);
-                    if syn_counter.bitand(1023u64) == 0 || syn_counter == 1u64 {
+/*
+                    cycles[0] += utils::rdtsc_unsafe() - begin;
+                    let trigger_count=(no_batches*16) as u64;
+                    if syn_counter == trigger_count || syn_counter == 1u64 {
                         tx_clone
                             .send(MessageFrom::GenTimeStamp(
                                 pipeline_id_clone.clone(),
@@ -523,6 +535,7 @@ pub fn setup_generator(
                                 cycles[1],
                             )).unwrap();
                     }
+*/
                 } else {
                     // check that flow steering worked:
                     assert!(sm.owns_tcp_port(hs.tcp.dst_port()));
@@ -536,7 +549,7 @@ pub fn setup_generator(
 
                         if hs.tcp.ack_flag() && hs.tcp.syn_flag() {
                             group_index = 1;
-                            if (c.con_rec.s_state == TcpState::SynReceived) {
+                            if c.con_rec.s_state == TcpState::SynReceived {
                                 c.server_con_established();
                                 tx_clone
                                     .send(MessageFrom::Established(pipeline_id_clone.clone(), c.con_rec.clone()))
@@ -546,7 +559,7 @@ pub fn setup_generator(
                                     hs.ip, hs.tcp
                                 );
                                 server_synack_received(p, &mut c, &mut hs, 1u32);
-                            } else if (c.con_rec.s_state == TcpState::Established) {
+                            } else if c.con_rec.s_state == TcpState::Established {
                                 server_synack_received(p, &mut c, &mut hs, 0u32);
                             } else {
                                 group_index = 0;
@@ -605,7 +618,7 @@ pub fn setup_generator(
                 }
 
                 // here we check if we shall release the connection state,
-                // required because of borrow checker for the state manager sm
+                // need this cumbersome way because of borrow checker for the state manager sm
                 if let Some(sport) = release_connection {
                     debug!("releasing port {}", sport);
                     let con_rec = sm.release_port(sport);

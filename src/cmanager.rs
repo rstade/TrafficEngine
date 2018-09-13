@@ -1,19 +1,14 @@
-use std::time::{Duration, Instant};
-use std::net::{Ipv4Addr, SocketAddrV4};
 use std::any::Any;
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::fmt;
 
-use e2d2::headers::MacHeader;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PacketRx, PortQueue};
 
 use eui48::MacAddress;
 use {MessageFrom, PipelineId};
-use timer_wheel::TimerWheel;
-use {Configuration, Timeouts};
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum TcpState {
@@ -80,7 +75,7 @@ impl ConRecord {
         self.release_cause
     }
 
-    fn new(pipeline_id: PipelineId) -> ConRecord {
+    fn new() -> ConRecord {
         ConRecord {
 //            con_hold: Duration::default(),
             c_state: TcpState::Listen,
@@ -108,10 +103,10 @@ impl Connection {
         self.con_rec.init(proxy_sport);
     }
 
-    fn new(pipeline_id: PipelineId) -> Connection {
+    fn new() -> Connection {
         Connection {
             c_seqn: 0,
-            con_rec: ConRecord::new(pipeline_id),
+            con_rec: ConRecord::new(),
         }
     }
 
@@ -159,13 +154,15 @@ impl fmt::Display for Connection {
 
 pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
+#[allow(dead_code)]
 pub struct ConnectionManager {
     free_ports: VecDeque<u16>,
     port2con: Vec<Connection>,
-    timeouts: Timeouts,
+    //timeouts: Timeouts,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
-    me: L234Data,
+    //me: L234Data,
     pipeline_id: PipelineId,
+    tx: Sender<MessageFrom>,
     tcp_port_base: u16,
 }
 
@@ -176,7 +173,13 @@ fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16)
 }
 
 impl ConnectionManager {
-    pub fn new(pipeline_id: PipelineId, pci: CacheAligned<PortQueue>, me: L234Data, me_config: Configuration) -> ConnectionManager {
+    pub fn new(
+        pipeline_id: PipelineId,
+        pci: CacheAligned<PortQueue>,
+        me: L234Data,
+        //me_config: Configuration
+        tx: Sender<MessageFrom>,
+    ) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let tcp_port_base: u16 = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
@@ -184,12 +187,13 @@ impl ConnectionManager {
         // program the NIC to send all flows for our owned ports to our rx queue
         pci.port.add_fdir_filter(pci.rxq() as u16, me.ip, tcp_port_base).unwrap();
         let mut cm = ConnectionManager {
-            port2con: vec![Connection::new(pipeline_id.clone()); (!port_mask + 1) as usize],
+            port2con: vec![Connection::new(); (!port_mask + 1) as usize],
             free_ports: (tcp_port_base..max_tcp_port).collect(),
-            timeouts: Timeouts::default_or_some(&me_config.engine.timeouts),
+            //timeouts: Timeouts::default_or_some(&me_config.engine.timeouts),
             pci,
-            me,
+            //me,
             pipeline_id,
+            tx,
             tcp_port_base,
         };
         // need to add last port this way to avoid overflow with slice, when max_tcp_port == 65535
@@ -329,18 +333,17 @@ impl ConnectionManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn release_ports(&mut self, ports: Vec<u16>) {
         ports.iter().for_each(|p| {
-            self.release_port(*p);
-        });
-    }
-
-    pub fn send_all_c_records(&self, tx: &Sender<MessageFrom>) {
-        for c in &self.port2con {
-            if c.p_port() != 0 {
-                tx.send(MessageFrom::CRecord(self.pipeline_id.clone(), c.con_rec.clone())).unwrap();
+            let con_record = self.release_port(*p);
+            if con_record.is_some() {
+                let con_record = con_record.unwrap();
+                self.tx
+                    .send(MessageFrom::CRecord(self.pipeline_id.clone(), con_record.clone()))
+                    .unwrap();
             }
-        }
+        })
     }
 }
 

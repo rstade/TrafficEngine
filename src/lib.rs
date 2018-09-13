@@ -25,7 +25,6 @@ pub use cmanager::{Connection, L234Data, ReleaseCause, UserData, ConRecord};
 
 pub mod errors;
 mod cmanager;
-mod timer_wheel;
 
 use ipnet::Ipv4Net;
 use eui48::MacAddress;
@@ -37,9 +36,7 @@ use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::PortQueue;
-use e2d2::queues::MpscProducer;
 use e2d2::interface::*;
-use e2d2::headers::{NullHeader, IpHeader, MacHeader, TcpHeader};
 
 use errors::*;
 use nftraffic::*;
@@ -51,7 +48,6 @@ use std::net::Ipv4Addr;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 use std::ptr;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::Receiver;
@@ -60,9 +56,6 @@ use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
 use std::fmt;
 
-use timer_wheel::{duration_to_micros, duration_to_millis};
-use std::sync::mpsc::SyncSender;
-use e2d2::common::EmptyMetadata;
 
 #[derive(Deserialize)]
 struct Config {
@@ -267,6 +260,7 @@ pub fn print_xstatistics(port_id: u16) -> i32 {
 
 pub fn setup_pipelines(
     core: i32,
+    no_batches: u32,
     ports: HashSet<CacheAligned<PortQueue>>,
     sched: &mut StandaloneScheduler,
     configuration: &Configuration,
@@ -320,6 +314,7 @@ pub fn setup_pipelines(
 
     setup_generator(
         core,
+        no_batches,
         pci.unwrap(),
         kni.unwrap(),
         sched,
@@ -355,10 +350,12 @@ pub enum MessageFrom {
     CRecord(PipelineId, ConRecord),
     ClientSyn(PipelineId, ConRecord),
     Established(PipelineId, ConRecord),
-    GenTimeStamp(PipelineId, u64, u64, u64), // generator timestamps : pipeline, count of sent syn, tsc-value
-    StartGenerator,
+    GenTimeStamp(PipelineId, u64, u64, u64),
+    // generator timestamps : pipeline, count of sent syn, tsc-value
+    StartEngine,
     Task(PipelineId, Uuid, TaskType),
-    PrintPerformance(Vec<i32>), // performance for the cores selected by the indices
+    PrintPerformance(Vec<i32>),
+    // performance for the cores selected by the indices
     Exit,                       // exit recv thread
 }
 
@@ -375,9 +372,10 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
     let _handle = thread::spawn(move || {
         let mut senders = HashMap::new();
         let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
-        let con_records: Vec<ConRecord> = Vec::with_capacity(5000);
+        let mut con_records: Vec<(PipelineId, ConRecord)> = Vec::with_capacity(5000);
+        let mut start_tsc: HashMap<PipelineId, u64> = HashMap::new();
 
-        for t in 0..TaskType::NoTaskTypes as usize {
+        for _t in 0..TaskType::NoTaskTypes as usize {
             tasks.push(Vec::<(PipelineId, Uuid)>::with_capacity(16));
         }
         // start execution of pipelines
@@ -447,17 +445,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     break;
                 }
                 Ok(MessageFrom::CRecord(pipe, con_record)) => {
-                    /* info!(
-                        "CRecord: pipe {}, p_port= {}, hold = {:6} ms, s-setup = {:6} us, {}, c/s_state = {:?}/{:?}, rc = {:?}",
-                        con_record.pipeline_id,
-                        con_record.p_port,
-                        duration_to_millis(&con_record.con_hold),
-                        duration_to_micros(&(con_record.s_ack_sent - con_record.s_syn_sent)),
-                        con_record.server_id,
-                        con_record.c_state,
-                        con_record.s_state,
-                        con_record.get_release_cause(),
-                    );*/
+                    con_records.push((pipe, con_record));
                 }
                 Ok(MessageFrom::ClientSyn(pipe, con_record)) => {
                     info!(
@@ -474,7 +462,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
 //                        duration_to_micros(&(con_record.s_ack_sent - con_record.s_syn_sent)),
                     );
                 }
-                Ok(MessageFrom::StartGenerator) => {
+                Ok(MessageFrom::StartEngine) => {
                     // distribute message to all pipelines
                     debug!("starting generator tasks");
                     /*
@@ -495,19 +483,32 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);
                     tasks[task_type as usize].push((pipeline_id, uuid));
                 }
-                Ok(MessageFrom::GenTimeStamp(pipeline_id, syn_count, tsc0, tsc1)) => info!(
-                    "pipe {}: GenTimeStamp -> count= {}, tsc0= {}, tsc1= {}",
-                    pipeline_id,
-                    syn_count,
-                    tsc0.separated_string(),
-                    tsc1.separated_string(),
-                ),
+                Ok(MessageFrom::GenTimeStamp(pipeline_id, count, tsc0, tsc1)) => {
+                    debug!(
+                        "pipe {}: GenTimeStamp -> count= {}, tsc0= {}, tsc1= {}",
+                        pipeline_id,
+                        count,
+                        tsc0.separated_string(),
+                        tsc1.separated_string(),
+                    );
+                    if count == 0 {
+                        start_tsc.insert(pipeline_id, tsc0);
+                    } else {
+                        let diff= (tsc0 - start_tsc.get(&pipeline_id).unwrap());
+                        info!(
+                            "pipe {}: count= {}, elapsed= {} cy, per count= {} cy",
+                            pipeline_id,
+                            count,
+                            diff.separated_string(),
+                            diff/count,
+                        );
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => {
                     error!("error receiving from MessageFrom channel: {}", e);
                     break;
                 }
-                _ => warn!("illegal message"),
             }
             match context.reply_receiver.as_ref().unwrap().recv_timeout(Duration::from_millis(10)) {
                 Ok(SchedulerReply::PerformanceData(core, map)) => {

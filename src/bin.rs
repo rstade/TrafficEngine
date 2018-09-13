@@ -15,8 +15,6 @@ use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 
 use traffic_lib::{get_mac_from_ifname, print_hard_statistics, read_config, setup_pipelines};
-use traffic_lib::Connection;
-use traffic_lib::Container;
 use traffic_lib::errors::*;
 use traffic_lib::L234Data;
 use traffic_lib::{MessageFrom,};
@@ -137,6 +135,7 @@ pub fn main() {
                                    p: HashSet<CacheAligned<PortQueue>>,
                                    s: &mut StandaloneScheduler| {
                         setup_pipelines(core,
+                                        512u32, // no of batches to generate per pipeline
                                         p,
                                         s,
                                         &config_cloned,
@@ -152,7 +151,7 @@ pub fn main() {
                 thread::sleep(Duration::from_millis(1000 as u64));
 
                 // start generator
-                mtx.send(MessageFrom::StartGenerator).unwrap();
+                mtx.send(MessageFrom::StartEngine).unwrap();
 
                 thread::sleep(Duration::from_millis(1000 as u64));
                 //main loop
