@@ -18,7 +18,7 @@ Note, that a local installation of NetBricks is necessary as it includes DPDK an
 
 The network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)): 
 
-First a network interface for user-space DPDK is needed. This interface is used by the engine to connect to servers (in the example configuration this interface uses PCI slot 07:00.0). The latest code is tested with NIC X520-DA2 (82599) and previous single rx/tx versions with e1000e and vmxnet3.
+First a network interface for user-space DPDK is needed. This interface is used by the engine to connect to servers (in the example configuration this interface uses PCI slot 07:00.0). The latest code is tested with NIC X520-DA2 (82599).
 
 Secondly an extra Linux interface is required which is used by the test modules for placing server stacks.
 
@@ -29,6 +29,3 @@ In addition some parameters like the Linux interface name (linux_if) and the IP 
 Latest code of TrafficEngine is tested on a 2-socket NUMA server, each socket hosting 4 physical cores, running Centos 7.5.
 
 
-_**ProxyEngine Test Configuration**_
-
-![proxyengine test configuration](https://github.com/silverengine-de/proxyengine/blob/master/proxyengine_config.png)
