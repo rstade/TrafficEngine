@@ -21,10 +21,11 @@ extern crate error_chain;
 
 pub mod nftraffic;
 
-pub use cmanager::{Connection, L234Data, ReleaseCause, UserData, ConRecord};
+pub use cmanager::{Connection, L234Data, ReleaseCause, UserData, ConRecord, TcpState, TcpCounter, TcpControls};
 
 pub mod errors;
 mod cmanager;
+mod tasks;
 
 use ipnet::Ipv4Net;
 use eui48::MacAddress;
@@ -40,6 +41,7 @@ use e2d2::interface::*;
 
 use errors::*;
 use nftraffic::*;
+use tasks::*;
 
 use std::fs::File;
 use std::io::Read;
@@ -66,7 +68,7 @@ struct Config {
 pub struct Configuration {
     pub targets: Vec<TargetConfig>,
     pub engine: EngineConfig,
-    pub queries: Option<usize>,
+    pub test_size: Option<usize>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -260,7 +262,7 @@ pub fn print_xstatistics(port_id: u16) -> i32 {
 
 pub fn setup_pipelines(
     core: i32,
-    no_batches: u32,
+    no_packets: usize,
     ports: HashSet<CacheAligned<PortQueue>>,
     sched: &mut StandaloneScheduler,
     configuration: &Configuration,
@@ -307,6 +309,7 @@ pub fn setup_pipelines(
                 name,
                 KniHandleRequest {
                     kni_port: kni.unwrap().port.clone(),
+                    last_tick: 0,
                 },
             ).ready(), // this task must be ready from the beginning to enable managing the KNI i/f
         );
@@ -314,7 +317,7 @@ pub fn setup_pipelines(
 
     setup_generator(
         core,
-        no_batches,
+        no_packets,
         pci.unwrap(),
         kni.unwrap(),
         sched,
@@ -342,25 +345,29 @@ pub enum TaskType {
     TcpGenerator = 0,
     Pipe2Kni = 1,
     Pipe2Pci = 2,
-    NoTaskTypes = 3, // for iteration over TaskType
+    TickGenerator =3,
+    NoTaskTypes = 4, // for iteration over TaskType
 }
 
 pub enum MessageFrom {
     Channel(PipelineId, Sender<MessageTo>),
-    CRecord(PipelineId, ConRecord),
-    ClientSyn(PipelineId, ConRecord),
     Established(PipelineId, ConRecord),
-    GenTimeStamp(PipelineId, u64, u64, u64),
-    // generator timestamps : pipeline, count of sent syn, tsc-value
-    StartEngine,
+    GenTimeStamp(PipelineId, &'static str, usize, u64, u64),
+    StartEngine(Sender<MessageTo>),
     Task(PipelineId, Uuid, TaskType),
-    PrintPerformance(Vec<i32>),
-    // performance for the cores selected by the indices
+    PrintPerformance(Vec<i32>), // performance of tasks on cores selected by indices
+    Counter(PipelineId, TcpCounter),
+    CRecords(PipelineId, Vec<ConRecord>),
+    FetchCounter,                // triggers fetching of counters from pipelines
+    FetchCRecords,
     Exit,                       // exit recv thread
 }
 
 pub enum MessageTo {
-    Hello,
+    FetchCounter,                // fetch counters from pipeline
+    FetchCRecords,
+    Counter(PipelineId, TcpCounter),
+    CRecords(PipelineId, Vec<ConRecord>),
     StartGenerator,
     Exit, // exit recv thread
 }
@@ -372,8 +379,22 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
     let _handle = thread::spawn(move || {
         let mut senders = HashMap::new();
         let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
-        let mut con_records: Vec<(PipelineId, ConRecord)> = Vec::with_capacity(5000);
-        let mut start_tsc: HashMap<PipelineId, u64> = HashMap::new();
+        let mut start_tsc: HashMap<(PipelineId, &'static str), u64> = HashMap::new();
+        let mut reply_to_main = None;
+
+        let l234data: Vec<L234Data> = configuration
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(i, srv_cfg)| L234Data {
+                mac: srv_cfg
+                    .mac
+                    .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
+                ip: u32::from(srv_cfg.ip),
+                port: srv_cfg.port,
+                server_id: srv_cfg.id.clone(),
+                index: i,
+            }).collect();
 
         for _t in 0..TaskType::NoTaskTypes as usize {
             tasks.push(Vec::<(PipelineId, Uuid)>::with_capacity(16));
@@ -400,7 +421,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
             }
         }
 
-        // interconnect with schedulers
+        // communicate with schedulers:
 
         loop {
             match mrx.recv_timeout(Duration::from_millis(10)) {
@@ -415,101 +436,96 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                             .scheduler_channels
                             .get(i)
                             .unwrap()
-                            .send(SchedulerCommand::SetTaskStateAll(false))
-                            .unwrap();
-                        context
-                            .scheduler_channels
-                            .get(i)
-                            .unwrap()
                             .send(SchedulerCommand::GetPerformance)
                             .unwrap();
-                    }
+                    };
                 }
-
                 Ok(MessageFrom::Exit) => {
+
+                    // stop all tasks on all schedulers
+                    for s in context.scheduler_channels.values() {
+                        s.send(SchedulerCommand::SetTaskStateAll(false)).unwrap();
+                    };
+
                     print_hard_statistics(1u16);
 
                     for port in context.ports.values() {
                         println!("Port {}:{}", port.port_type(), port.port_id());
                         port.print_soft_statistics();
-                    }
+                    };
                     println!("terminating TrafficEngine ...");
                     context.stop();
-                    /*
-                    senders.values().for_each(|ref tx| {
-                        tx.send(MessageTo::Exit).unwrap();
-                    });
-                    // give receivers time to read the Exit message before closing the channel
-                    thread::sleep(Duration::from_millis(200 as u64));
-                    */
                     break;
-                }
-                Ok(MessageFrom::CRecord(pipe, con_record)) => {
-                    con_records.push((pipe, con_record));
-                }
-                Ok(MessageFrom::ClientSyn(pipe, con_record)) => {
-                    info!(
-                        "ClientSyn: pipe {}: p_port= {}",
-                        pipe, con_record.p_port,
-                    );
                 }
                 Ok(MessageFrom::Established(pipe, con_record)) => {
                     info!(
                         // "pipe {}: Established -> {}, c-sock={},  s-setup = {:6} us",
-                        "pipe {}: Established -> {} ",
+                        "pipe {}: {} -> {} ",
                         pipe,
-                        con_record.server_id,
-//                        duration_to_micros(&(con_record.s_ack_sent - con_record.s_syn_sent)),
+                        con_record,
+                        l234data[con_record.server_index].server_id,
                     );
                 }
-                Ok(MessageFrom::StartEngine) => {
-                    // distribute message to all pipelines
+                Ok(MessageFrom::StartEngine(reply_channel)) => {
                     debug!("starting generator tasks");
-                    /*
-                    for t in 0..TaskType::NoTaskTypes as usize {
-                        debug!("starting tasks {:?}", t);
-                        for (pipeline_id, uuid) in &tasks[t] {
-                            let sync_sender = context.scheduler_channels.get(&(pipeline_id.core as i32));
-                            if sync_sender.is_some() {
-                                sync_sender.unwrap().send(SchedulerCommand::SetTaskState(uuid.clone(), true)).unwrap();
-                            }
-                        }
-                    } */
+                    reply_to_main = Some(reply_channel);
                     for s in &context.scheduler_channels {
                         s.1.send(SchedulerCommand::SetTaskStateAll(true)).unwrap();
-                    }
+                    };
                 }
                 Ok(MessageFrom::Task(pipeline_id, uuid, task_type)) => {
                     debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);
                     tasks[task_type as usize].push((pipeline_id, uuid));
                 }
-                Ok(MessageFrom::GenTimeStamp(pipeline_id, count, tsc0, tsc1)) => {
+                Ok(MessageFrom::GenTimeStamp(pipeline_id, item, count, tsc0, tsc1)) => {
                     debug!(
-                        "pipe {}: GenTimeStamp -> count= {}, tsc0= {}, tsc1= {}",
+                        "pipe {}: GenTimeStamp for item {} -> count= {}, tsc0= {}, tsc1= {}",
                         pipeline_id,
+                        item,
                         count,
                         tsc0.separated_string(),
                         tsc1.separated_string(),
                     );
                     if count == 0 {
-                        start_tsc.insert(pipeline_id, tsc0);
+                        start_tsc.insert((pipeline_id, item), tsc0);
                     } else {
-                        let diff= (tsc0 - start_tsc.get(&pipeline_id).unwrap());
+                        let diff = tsc0 - start_tsc.get(&(pipeline_id.clone(), item)).unwrap();
                         info!(
-                            "pipe {}: count= {}, elapsed= {} cy, per count= {} cy",
+                            "pipe {}: item= {}, count= {}, elapsed= {} cy, per count= {} cy",
                             pipeline_id,
+                            item,
                             count,
                             diff.separated_string(),
-                            diff/count,
+                            diff / count as u64,
                         );
-                    }
+                    };
+                }
+                Ok(MessageFrom::Counter(pipeline_id, tcp_counter)) => {
+                    if reply_to_main.is_some() {
+                        reply_to_main.as_ref().unwrap().send(MessageTo::Counter(pipeline_id, tcp_counter)).unwrap();
+                    };
+                }
+                Ok(MessageFrom::FetchCounter) => {
+                    for (_p, s) in &senders {
+                        s.send(MessageTo::FetchCounter).unwrap();
+                    };
+                }
+                Ok(MessageFrom::CRecords(pipeline_id, c_records)) => {
+                    if reply_to_main.is_some() {
+                        reply_to_main.as_ref().unwrap().send(MessageTo::CRecords(pipeline_id, c_records)).unwrap();
+                    };
+                }
+                Ok(MessageFrom::FetchCRecords) => {
+                    for (_p, s) in &senders {
+                        s.send(MessageTo::FetchCRecords).unwrap();
+                    };
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => {
                     error!("error receiving from MessageFrom channel: {}", e);
                     break;
                 }
-            }
+            };
             match context.reply_receiver.as_ref().unwrap().recv_timeout(Duration::from_millis(10)) {
                 Ok(SchedulerReply::PerformanceData(core, map)) => {
                     for d in map {

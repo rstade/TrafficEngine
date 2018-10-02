@@ -1,39 +1,46 @@
 extern crate ctrlc;
 extern crate e2d2;
-extern crate env_logger;
-extern crate eui48;
-extern crate ipnet;
-// Logging
+extern crate traffic_lib;
+extern crate time;
 #[macro_use]
 extern crate log;
-extern crate traffic_lib;
+extern crate env_logger;
+extern crate ipnet;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::env;
+use std::time::Duration;
+use std::thread;
+use std::net::{TcpListener};
+use std::sync::mpsc::channel;
+use std::sync::mpsc::RecvTimeoutError;
+use std::collections::{HashSet, HashMap};
 
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::interface::{PortType, PortQueue};
 use e2d2::native::zcsi::*;
-use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
+use e2d2::interface::{PortQueue, PortType};
+use e2d2::scheduler::{initialize_system, NetBricksContext};
+use e2d2::scheduler::StandaloneScheduler;
 use e2d2::allocators::CacheAligned;
 
-use traffic_lib::{get_mac_from_ifname, print_hard_statistics, read_config, setup_pipelines};
-use traffic_lib::errors::*;
+use traffic_lib::read_config;
+use traffic_lib::{get_mac_from_ifname, print_hard_statistics};
+use traffic_lib::setup_pipelines;
 use traffic_lib::L234Data;
 use traffic_lib::{MessageFrom, MessageTo};
 use traffic_lib::spawn_recv_thread;
+use traffic_lib::errors::*;
+
 use traffic_lib::ReleaseCause;
-use traffic_lib::{TcpState};
+use traffic_lib::{TcpState, TcpControls};
+use std::vec::Vec;
 
-use std::collections::{HashSet, HashMap};
-use std::env;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::channel;
-use std::sync::mpsc::RecvTimeoutError;
-use std::thread;
-use std::time::Duration;
-
-pub fn main() {
+#[test]
+fn test_connect() {
     env_logger::init();
-    info!("Starting TrafficEngine ..");
+    info!("Testing trafficengine: setup and release of connections ...");
+    let toml_file = "tests/test_gen.toml";
 
     let log_level_rte = if log_enabled!(log::Level::Debug) {
         RteLogLevel::RteLogDebug
@@ -46,17 +53,13 @@ pub fn main() {
         info!("dpdk log global level: {}", rte_log_get_global_level());
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
-    // read config file name from command line
-    let args: Vec<String> = env::args().collect();
-    let config_file;
-    if args.len() > 1 {
-        config_file = args[1].clone();
-    } else {
-        println!("try 'trafficengine <toml configuration file>'\n");
-        std::process::exit(1);
-    }
 
-    let configuration = read_config(&config_file).unwrap();
+    let configuration = read_config(toml_file).unwrap();
+
+    if configuration.test_size.is_none() {
+        error!("missing parameter 'test_size' in configuration file {}", toml_file);
+        std::process::exit(1);
+    };
 
     fn am_root() -> bool {
         match env::var("USER") {
@@ -82,7 +85,7 @@ pub fn main() {
 
     let opts = basic_opts();
 
-    let args: Vec<String> = vec!["trafficengine", "-f", &config_file]
+    let args: Vec<String> = vec!["proxyengine", "-f", toml_file]
         .iter()
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
@@ -130,17 +133,17 @@ pub fn main() {
             let (mtx, mrx) = channel::<MessageFrom>();
             let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
-            let config_cloned = configuration.clone();
+            let configuration_cloned = configuration.clone();
             let mtx_clone = mtx.clone();
 
             context.add_pipeline_to_run(Box::new(
                 move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
                     setup_pipelines(
                         core,
-                        512, // no of batches to generate per pipeline
+                        configuration_cloned.test_size.unwrap(),
                         p,
                         s,
-                        &config_cloned,
+                        &configuration_cloned,
                         l234data.clone(),
                         mtx_clone.clone(),
                     );
@@ -148,23 +151,45 @@ pub fn main() {
             ));
 
             // start the controller
-            spawn_recv_thread(mrx, context, configuration);
+            spawn_recv_thread(mrx, context, configuration.clone());
 
             // give threads some time to do initialization work
             thread::sleep(Duration::from_millis(1000 as u64));
 
+
+            // set up servers
+            for server in configuration.targets {
+                let target_port = server.port; // moved into thread
+                let target_ip = server.ip;
+                let id = server.id;
+                thread::spawn(move || match TcpListener::bind((target_ip, target_port)) {
+                    Ok(listener1) => {
+                        debug!("bound server {} to {}:{}", id, target_ip, target_port);
+                        for stream in listener1.incoming() {
+                            let mut stream = stream.unwrap();
+                            // debug!("{} received connection from: {}", id, stream.peer_addr().unwrap());
+                        }
+                    }
+                    _ => {
+                        panic!("failed to bind server {} to {}:{}", id, target_ip, target_port);
+                    }
+                });
+            }
+
+            thread::sleep(Duration::from_millis(2000 as u64)); // wait for the servers
+
             // start generator
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
 
-            thread::sleep(Duration::from_millis(1000 as u64));
+            thread::sleep(Duration::from_millis(5000 as u64));
+            mtx.send(MessageFrom::PrintPerformance(vec![1,2])).unwrap();
+            thread::sleep(Duration::from_millis(100 as u64));
             //main loop
-            println!("press ctrl-c to terminate engine ...");
+            /* println!("press ctrl-c to terminate proxy ...");
             while running.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
             }
-
-            mtx.send(MessageFrom::PrintPerformance(vec![1,2])).unwrap();
-            thread::sleep(Duration::from_millis(100 as u64));
+            */
             mtx.send(MessageFrom::FetchCounter).unwrap();
             mtx.send(MessageFrom::FetchCRecords).unwrap();
 
@@ -178,9 +203,9 @@ pub fn main() {
                         tcp_counters.insert(pipeline_id, tcp_counter);
                     }
                     Ok(MessageTo::CRecords(pipeline_id, c_records)) =>
-                        {
-                            con_records.insert(pipeline_id, c_records);
-                        }
+                    {
+                        con_records.insert(pipeline_id, c_records);
+                    }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                     Err(RecvTimeoutError::Timeout) =>  { break; }
                     Err(e) => {
@@ -201,14 +226,13 @@ pub fn main() {
                             completed_count += 1
                         };
                 });
-                debug!("{} completed connections", completed_count);
+                assert_eq!(completed_count, tcp_counters.get(&p).unwrap()[TcpControls::SentSyn]);
             }
 
-
-
             mtx.send(MessageFrom::Exit).unwrap();
+            thread::sleep(Duration::from_millis(2000));
 
-            thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+            debug!("terminating TrafficEngine");
             std::process::exit(0);
         }
         Err(ref e) => {
