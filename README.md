@@ -1,7 +1,8 @@
 _**TrafficEngine Overview**_
 
 TrafficEngine is a stateful user-space TCP traffic generator written in Rust with following properties
-* high performance: multi-core, shared nothing, locking-free architecture
+* high performance: some hundred thousand TCP connections per second (cps) per core). For comparison, modern web servers support some ten thousand cps per core, e.g. https://www.nginx.com/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers/
+* multi-core, shared nothing, locking-free architecture 
 * server side receive flow steering (RFS) by NIC
 
 It may be used for (load-)testing  TCP based application servers and TCP proxies. TrafficEngine maintains TCP-state and can therefore setup and release complete TCP connections.
@@ -22,7 +23,7 @@ First a network interface for user-space DPDK is needed. This interface is used 
 
 Secondly an extra Linux interface is required which is used by the test modules for placing server stacks.
 
-For integration testing both interfaces must be interconnected. In case of virtual interfaces, e.g. interfaces may be connected to a host-only network of the hypervisor. Using Wireshark on this network allows us to observe the complete traffic exchange between clients, the proxy and the servers. In case of physical interfaces, interfaces my be connected by a cross over cable.
+For integration testing both interfaces must be interconnected. In case of virtual interfaces, e.g. interfaces may be connected to a host-only network of the hypervisor. Using Wireshark on this network allows us to observe the traffic exchange between clients, the proxy and the servers. However, as wireshark may not keep up with the transmission speeds of modern line cards, packets may be lost. In case of physical interfaces, interfaces my be connected by a cross over cable.
 
 In addition some parameters like the Linux interface name (linux_if) and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
 

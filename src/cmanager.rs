@@ -14,7 +14,8 @@ use e2d2::utils;
 
 use eui48::MacAddress;
 use separator::Separatable;
-use {MessageFrom, PipelineId};
+use timer_wheel::{TimerWheel};
+use {EngineConfig, MessageFrom, PipelineId, Timeouts};
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum TcpState {
@@ -187,16 +188,19 @@ impl ConRecord {
         }
     }
 
+    #[inline]
     pub fn push_c_state(&mut self, state: TcpState) {
         self.c_state[self.c_count]=state;
         self.stamps[self.c_count] = utils::rdtsc_unsafe();
         self.c_count+=1;
     }
 
+    #[inline]
     pub fn last_c_state(&self) -> &TcpState {
         &self.c_state[self.c_count-1]
     }
 
+    #[inline]
     pub fn c_states(&self) -> &[TcpState] { &self.c_state[0..self.c_count] }
 
     pub fn elapsed_since_synsent(&self) -> Vec<u64> {
@@ -285,7 +289,7 @@ pub struct ConnectionManager {
     con_records: Vec<ConRecord>,
     free_ports: VecDeque<u16>,
     port2con: Vec<Connection>,
-    //timeouts: Timeouts,
+    timeouts: Timeouts,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
     pipeline_id: PipelineId,
     tx: Sender<MessageFrom>,
@@ -302,7 +306,7 @@ impl ConnectionManager {
     pub fn new(
         pipeline_id: PipelineId,
         pci: CacheAligned<PortQueue>,
-        me: L234Data,
+        engine_config: &EngineConfig,
         tx: Sender<MessageFrom>,
     ) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
@@ -310,12 +314,12 @@ impl ConnectionManager {
         let tcp_port_base: u16 = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
         let max_tcp_port: u16 = tcp_port_base + !port_mask;
         // program the NIC to send all flows for our owned ports to our rx queue
-        pci.port.add_fdir_filter(pci.rxq() as u16, me.ip, tcp_port_base).unwrap();
+        pci.port.add_fdir_filter(pci.rxq() as u16, engine_config.get_l234data().ip, tcp_port_base).unwrap();
         let mut cm = ConnectionManager {
             con_records: Vec::with_capacity(100000),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
             free_ports: (tcp_port_base..max_tcp_port).collect(),
-            //timeouts: Timeouts::default_or_some(&me_config.engine.timeouts),
+            timeouts: Timeouts::default_or_some(&engine_config.timeouts),
             pci,
             pipeline_id,
             tx,
@@ -386,30 +390,14 @@ impl ConnectionManager {
             None
         }
     }
-/*
-    fn get_timeouts(&mut self, now: &Instant, wheel: &mut TimerWheel<u16>) -> Vec<u16> {
-        let mut con_timeouts: Vec<u16> = Vec::new();
-        let resolution = wheel.get_resolution();
+
+    pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<u16>)  {
         loop {
             match wheel.tick(now) {
                 (Some(mut drain), more) => {
                     let mut port = drain.next();
                     while port.is_some() {
-                        //self.check_timeout(&port.unwrap());
-                        let p = port.unwrap();
-                        let timeout = self.timeouts.established.unwrap_or(200);
-                        let c = self.get_mut_con(&p);
-                        if *now - c.con_rec.c_syn_recv >= Duration::from_millis(timeout) - resolution {
-                            if c.con_rec.s_state < TcpState::Established {
-                                c.con_rec.c_released(ReleaseCause::Timeout);
-                                con_timeouts.push(p);
-                            }
-                        } else {
-                            warn!(
-                                "incomplete timeout: s_state = {:?}, syn_received = {:?}, now ={:?}",
-                                c.con_rec.s_state, c.con_rec.c_syn_recv, now,
-                            );
-                        }
+                        self.timeout(port.unwrap());
                         port = drain.next();
                     }
                     if !more {
@@ -421,9 +409,17 @@ impl ConnectionManager {
                 },
             }
         }
-        con_timeouts
     }
-*/
+
+    #[inline]
+    fn timeout(&mut self, port: u16) {
+        {
+            let c = self.get_mut_con(&port);
+            c.con_rec.c_released(ReleaseCause::Timeout);
+            c.con_rec.push_c_state(TcpState::Closed)
+        }
+        self.release_port(port);
+    }
 
     // create a new connection, if out of resources return None
     pub fn create(&mut self) -> Option<&mut Connection> {
@@ -443,13 +439,13 @@ impl ConnectionManager {
         }
     }
 
-    pub fn release_port(&mut self, proxy_port: u16) {
-        let c = &mut self.port2con[(proxy_port - self.tcp_port_base) as usize];
+    pub fn release_port(&mut self, port: u16) {
+        let c = &mut self.port2con[(port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
         if c.p_port() != 0 {
             self.con_records.push(c.con_rec.clone());
-            self.free_ports.push_back(proxy_port);
-            assert_eq!(proxy_port, c.p_port());
+            self.free_ports.push_back(port);
+            assert_eq!(port, c.p_port());
             c.set_p_port(0u16); // this indicates an unused connection,
             // we keep unused connection in port2con table
         }
@@ -461,6 +457,7 @@ impl ConnectionManager {
         self.port2con.iter().for_each(|c| if c.p_port()!=0  { c_records.push(c.con_rec.clone());} );
     }
 
+    #[allow(dead_code)]
     pub fn dump_records(&mut self) {
         info!("{}: {:6} closed connections", self.pipeline_id, self.con_records.len());
         self.con_records.iter().enumerate().for_each(|(i,c)| debug!("{:6}: {}", i, c) );

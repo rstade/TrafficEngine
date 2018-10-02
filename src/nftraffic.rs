@@ -10,16 +10,14 @@ use e2d2::utils;
 
 use std::process::Command;
 use std::sync::mpsc::{Sender, channel};
-use std::time::Duration;
 
-use eui48::MacAddress;
-use ipnet::Ipv4Net;
 use uuid::Uuid;
 
 use cmanager::*;
-use Configuration;
-use {PipelineId, MessageFrom, MessageTo, TaskType};
+use EngineConfig;
+use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, PacketInjector, TickGenerator};
+use timer_wheel::{MILLIS_TO_CYCLES, TimerWheel};
 
 //const MIN_FRAME_SIZE: usize = 60; // without fcs
 
@@ -116,7 +114,7 @@ pub fn setup_generator(
     pci: &CacheAligned<PortQueue>,
     kni: &CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
-    configuration: &Configuration,
+    engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     tx: Sender<MessageFrom>,
 ) {
@@ -133,13 +131,7 @@ pub fn setup_generator(
         tx.send(MessageFrom::Task(pipeline_id.clone(), uuid, task_type)).unwrap();
     }
 
-    let me = L234Data {
-        mac: MacAddress::parse_str(&configuration.engine.mac).unwrap(),
-        ip: u32::from(configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr()),
-        port: configuration.engine.port,
-        server_id: "TrafficEngine".to_string(),
-        index: 0,
-    };
+    let me = engine_config.get_l234data();
 
     let pipeline_id = PipelineId {
         core: core as u16,
@@ -148,13 +140,10 @@ pub fn setup_generator(
     };
     debug!("enter setup_generator {}", pipeline_id);
 
-    let mut sm: ConnectionManager = ConnectionManager::new(
-        pipeline_id.clone(),
-        pci.clone(),
-        me.clone(),
-        //        configuration.clone(),
-        tx.clone(),
-    );
+    let mut sm: ConnectionManager = ConnectionManager::new(pipeline_id.clone(), pci.clone(), &engine_config, tx.clone());
+
+    let timeouts = Timeouts::default_or_some(&engine_config.timeouts);
+    let mut wheel = TimerWheel::new(128, 100 * MILLIS_TO_CYCLES, 128);
 
     // setting up a a reverse message channel between this pipeline and the main program thread
     debug!("setting up reverse channel from pipeline {}", pipeline_id);
@@ -229,24 +218,26 @@ pub fn setup_generator(
     //    let creator = PacketInjector::new(producer, &me, no_packets, pipeline_id.clone(), tx_clone.clone());
     let creator = PacketInjector::new(producer, &me, no_packets);
 
-
-    let mut counter= TcpCounter::new();
+    let mut counter = TcpCounter::new();
     install_task(sched, &tx, &pipeline_id, "PacketInjector", TaskType::TcpGenerator, creator);
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
     let tick_generator = TickGenerator::new(producer_timerticks, &me, 22700);
+    assert!(wheel.resolution() > tick_generator.tick_length());
+    let wheel_tick_reduction_factor = wheel.resolution() / tick_generator.tick_length();
+    let mut ticks = 0;
     install_task(sched, &tx, &pipeline_id, "TickGenerator", TaskType::TickGenerator, tick_generator);
 
     let pipeline_id_clone = pipeline_id.clone();
 
     let l2_input_stream = merge_with_selector(
         vec![
-        consumer.compose(),
-        consumer_timerticks.compose(),
-        l2groups.get_group(1).unwrap().compose(),
+            consumer.compose(),
+            consumer_timerticks.compose(),
+            l2groups.get_group(1).unwrap().compose(),
         ],
-        vec![0,2,0,2,0,2,0,2,0,2,1]
+        vec![0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 1],
     );
     // group 0 -> dump packets
     // group 1 -> send to PCI
@@ -369,7 +360,7 @@ pub fn setup_generator(
 
                     update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
                     *syn_counter += 1;
-                    if *syn_counter % 1000 == 0  {
+                    if *syn_counter % 1000 == 0 {
                         debug!("{}: sent {} SYNs", pipeline_id, *syn_counter);
                     }
                     //debug!("SYN packet to server - L3: {}, L4: {}", h.ip, p.get_header());
@@ -407,9 +398,12 @@ pub fn setup_generator(
                                 &tx_clone,
                                 &pipeline_id_clone,
                                 &mut counter[TcpControls::SentSyn],
-                                //&no_packets,
                             );
                             c.con_rec.push_c_state(TcpState::SynSent);
+                            wheel.schedule(
+                                &(utils::rdtsc_unsafe() + timeouts.established.unwrap() * MILLIS_TO_CYCLES),
+                                c.p_port(),
+                            );
                             group_index = 1;
                         }
 
@@ -425,7 +419,7 @@ pub fn setup_generator(
                         }
                     }
                     PRIVATE_ETYPE_TIMER => {
-                        //debug!("got tick at {}", utils::rdtsc_unsafe())
+                        ticks += 1;
                         match rx.try_recv() {
                             Ok(MessageTo::FetchCounter) => {
                                 tx_clone
@@ -438,7 +432,11 @@ pub fn setup_generator(
                                     .send(MessageFrom::CRecords(pipeline_id_clone.clone(), sm.fetch_c_records()))
                                     .unwrap();
                             }
-                            _ => { }
+                            _ => {}
+                        }
+                        // check for timeouts
+                        if ticks % wheel_tick_reduction_factor == 0 {
+                            sm.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel);
                         }
                     }
                     _ => {
@@ -453,7 +451,7 @@ pub fn setup_generator(
                             let old_c_state = c.con_rec.last_c_state().clone();
                             if hs.tcp.ack_flag() && hs.tcp.syn_flag() {
                                 group_index = 1;
-                                counter[TcpControls::RecvSynAck] +=1;
+                                counter[TcpControls::RecvSynAck] += 1;
                                 if old_c_state == TcpState::SynSent {
                                     c.con_established();
                                     //tx_clone
@@ -464,21 +462,21 @@ pub fn setup_generator(
                                     //    hs.ip, hs.tcp
                                     //);
                                     server_synack_received(p, &mut c, &mut hs, 1u32);
-                                    counter[TcpControls::SentAck] +=1;
+                                    counter[TcpControls::SentAck] += 1;
                                 } else if old_c_state == TcpState::Established {
                                     server_synack_received(p, &mut c, &mut hs, 0u32);
-                                    counter[TcpControls::SentAck] +=1;
+                                    counter[TcpControls::SentAck] += 1;
                                 } else {
                                     warn!("received SYN-ACK in wrong state: {:?}", old_c_state);
                                     group_index = 0;
                                 } // ignore the SynAck
                             } else if hs.tcp.fin_flag() {
                                 if old_c_state >= TcpState::FinWait1 {
-                                    counter[TcpControls::RecvFinAck ]+=1;
+                                    counter[TcpControls::RecvFinAck] += 1;
                                     // got FIN receipt to a client initiated FIN
                                     debug!("received FIN-reply from server on port {}", hs.tcp.dst_port());
                                     c.con_rec.push_c_state(TcpState::Closed);
-                                    // TODO return an ACK
+                                // TODO return an ACK
                                 } else {
                                     // server initiated TCP close
                                     /*
@@ -489,19 +487,19 @@ pub fn setup_generator(
                                     );
                                     */
                                     //c.con_rec.push_s_state(TcpState::FinWait1);
-                                    counter[TcpControls::RecvFin]+=1;
+                                    counter[TcpControls::RecvFin] += 1;
                                     c.con_rec.push_c_state(TcpState::LastAck);
                                     make_reply_packet(&mut hs);
                                     hs.tcp.set_ack_flag();
                                     //c.c_seqn = c.c_seqn.wrapping_add(1);
                                     hs.tcp.set_seq_num(c.c_seqn);
-                                    counter[TcpControls::SentFinAck] +=1;
+                                    counter[TcpControls::SentFinAck] += 1;
                                     update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
                                     group_index = 1;
                                 }
                             } else if hs.tcp.rst_flag() {
                                 //c.con_rec.push_s_state(TcpState::Closed);
-                                counter[TcpControls::RecvRst]+=1;
+                                counter[TcpControls::RecvRst] += 1;
                                 c.con_rec.push_c_state(TcpState::Closed);
                                 c.con_rec.c_released(ReleaseCause::RstServer);
                                 // release connection in the next block
@@ -510,13 +508,13 @@ pub fn setup_generator(
                                 // received final ack from server for server initiated close
                                 //debug!("received final ACK for server initiated close on port { }", hs.tcp.dst_port());
                                 //c.con_rec.push_s_state(TcpState::Closed);
-                                counter[TcpControls::RecvFinAck2]+=1;
+                                counter[TcpControls::RecvFinAck2] += 1;
                                 c.con_rec.push_c_state(TcpState::Closed);
                                 c.con_rec.c_released(ReleaseCause::FinServer);
                                 // release connection in the next block
                                 release_connection = Some(c.p_port());
                             } else {
-                                counter[TcpControls::Unexpected]+=1;
+                                counter[TcpControls::Unexpected] += 1;
                                 // debug!("received from server { } in c/s state {:?}/{:?} ", hs.tcp, c.con_rec.c_state, c.con_rec.s_state);
                                 b_unexpected = true; //  except we revise it, see below
                             }

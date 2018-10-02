@@ -25,6 +25,7 @@ pub use cmanager::{Connection, L234Data, ReleaseCause, UserData, ConRecord, TcpS
 
 pub mod errors;
 mod cmanager;
+mod timer_wheel;
 mod tasks;
 
 use ipnet::Ipv4Net;
@@ -78,6 +79,18 @@ pub struct EngineConfig {
     pub ipnet: String,
     pub timeouts: Option<Timeouts>,
     pub port: u16,
+}
+
+impl EngineConfig {
+    pub fn get_l234data(&self) -> L234Data {
+        L234Data {
+            mac: MacAddress::parse_str(&self.mac).unwrap(),
+            ip: u32::from(self.ipnet.parse::<Ipv4Net>().unwrap().addr()),
+            port: self.port,
+            server_id: "Engine".to_string(),
+            index: 0,
+        }
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -265,7 +278,7 @@ pub fn setup_pipelines(
     no_packets: usize,
     ports: HashSet<CacheAligned<PortQueue>>,
     sched: &mut StandaloneScheduler,
-    configuration: &Configuration,
+    engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     tx: Sender<MessageFrom>,
 )
@@ -321,7 +334,7 @@ pub fn setup_pipelines(
         pci.unwrap(),
         kni.unwrap(),
         sched,
-        configuration,
+        engine_config,
         servers,
         tx,
     );
@@ -501,11 +514,13 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     };
                 }
                 Ok(MessageFrom::Counter(pipeline_id, tcp_counter)) => {
+                    debug!("{}: received Counter", pipeline_id);
                     if reply_to_main.is_some() {
                         reply_to_main.as_ref().unwrap().send(MessageTo::Counter(pipeline_id, tcp_counter)).unwrap();
                     };
                 }
                 Ok(MessageFrom::FetchCounter) => {
+                    debug!("received FetchCounter command");
                     for (_p, s) in &senders {
                         s.send(MessageTo::FetchCounter).unwrap();
                     };

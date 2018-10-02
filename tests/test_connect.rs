@@ -143,7 +143,7 @@ fn test_connect() {
                         configuration_cloned.test_size.unwrap(),
                         p,
                         s,
-                        &configuration_cloned,
+                        &configuration_cloned.engine,
                         l234data.clone(),
                         mtx_clone.clone(),
                     );
@@ -166,7 +166,7 @@ fn test_connect() {
                     Ok(listener1) => {
                         debug!("bound server {} to {}:{}", id, target_ip, target_port);
                         for stream in listener1.incoming() {
-                            let mut stream = stream.unwrap();
+                            let mut _stream = stream.unwrap();
                             // debug!("{} received connection from: {}", id, stream.peer_addr().unwrap());
                         }
                     }

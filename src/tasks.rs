@@ -140,8 +140,10 @@ pub struct TickGenerator {
     producer: MpscProducer,
     last_tick: u64,
     tick_length: u64, // in cycles
+    tick_count: u64
 }
 
+#[allow(dead_code)]
 impl TickGenerator {
     pub fn new(
         producer: MpscProducer,
@@ -176,22 +178,33 @@ impl TickGenerator {
             packet_prototype,
             producer,
             last_tick:0,
+            tick_count:0,
             tick_length: tick_length_1000*1000,
         }
+    }
+
+    #[inline]
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count
+    }
+
+    #[inline]
+    pub fn tick_length(&self) -> u64 {
+        self.tick_length
     }
 }
 
 impl Executable for TickGenerator {
-    fn execute(&mut self) -> u32 {
-        let mut count = 0;
+    fn execute(&mut self) -> u32  {
         let p;
         let now = utils::rdtsc_unsafe();
         if now-self.last_tick >= self.tick_length {
             unsafe { p = self.packet_prototype.copy(); }
             self.producer.enqueue_one(p);
-            count += 1;
             self.last_tick = now;
+            self.tick_count+=1;
+            1
         }
-        count
+        else { 0 }
     }
 }

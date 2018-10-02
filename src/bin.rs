@@ -137,10 +137,10 @@ pub fn main() {
                 move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
                     setup_pipelines(
                         core,
-                        512, // no of batches to generate per pipeline
+                        config_cloned.test_size.unwrap(), // no of packets to generate per pipeline
                         p,
                         s,
-                        &config_cloned,
+                        &config_cloned.engine,
                         l234data.clone(),
                         mtx_clone.clone(),
                     );
@@ -177,10 +177,9 @@ pub fn main() {
                         info!("{}: {}", pipeline_id, tcp_counter);
                         tcp_counters.insert(pipeline_id, tcp_counter);
                     }
-                    Ok(MessageTo::CRecords(pipeline_id, c_records)) =>
-                        {
-                            con_records.insert(pipeline_id, c_records);
-                        }
+                    Ok(MessageTo::CRecords(pipeline_id, c_records)) => {
+                        con_records.insert(pipeline_id, c_records);
+                    }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                     Err(RecvTimeoutError::Timeout) =>  { break; }
                     Err(e) => {
