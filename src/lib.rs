@@ -20,7 +20,7 @@ extern crate serde;
 extern crate error_chain;
 
 pub mod nftraffic;
-
+pub mod run_test;
 pub use cmanager::{Connection, L234Data, ReleaseCause, UserData, ConRecord, TcpState, TcpCounter, TcpControls};
 
 pub mod errors;
@@ -369,7 +369,7 @@ pub enum MessageFrom {
     StartEngine(Sender<MessageTo>),
     Task(PipelineId, Uuid, TaskType),
     PrintPerformance(Vec<i32>), // performance of tasks on cores selected by indices
-    Counter(PipelineId, TcpCounter),
+    Counter(PipelineId, TcpCounter, TcpCounter),
     CRecords(PipelineId, Vec<ConRecord>),
     FetchCounter,                // triggers fetching of counters from pipelines
     FetchCRecords,
@@ -379,7 +379,7 @@ pub enum MessageFrom {
 pub enum MessageTo {
     FetchCounter,                // fetch counters from pipeline
     FetchCRecords,
-    Counter(PipelineId, TcpCounter),
+    Counter(PipelineId, TcpCounter, TcpCounter),
     CRecords(PipelineId, Vec<ConRecord>),
     StartGenerator,
     Exit, // exit recv thread
@@ -513,10 +513,10 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                         );
                     };
                 }
-                Ok(MessageFrom::Counter(pipeline_id, tcp_counter)) => {
+                Ok(MessageFrom::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)) => {
                     debug!("{}: received Counter", pipeline_id);
                     if reply_to_main.is_some() {
-                        reply_to_main.as_ref().unwrap().send(MessageTo::Counter(pipeline_id, tcp_counter)).unwrap();
+                        reply_to_main.as_ref().unwrap().send(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)).unwrap();
                     };
                 }
                 Ok(MessageFrom::FetchCounter) => {

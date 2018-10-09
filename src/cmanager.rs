@@ -1,5 +1,6 @@
+use std::net::{SocketAddrV4, Ipv4Addr};
 use std::any::Any;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::fmt;
@@ -8,13 +9,14 @@ use std::convert;
 use std::ops::{Index, IndexMut};
 use std::mem;
 
+use e2d2::headers::MacHeader;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PacketRx, PortQueue};
 use e2d2::utils;
 
 use eui48::MacAddress;
 use separator::Separatable;
-use timer_wheel::{TimerWheel};
+use timer_wheel::{TimerWheel, MILLIS_TO_CYCLES};
 use {EngineConfig, MessageFrom, PipelineId, Timeouts};
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -143,8 +145,8 @@ pub trait UserData: Send + Sync + 'static {
 pub enum ReleaseCause {
     Unknown = 0,
     Timeout = 1,
-    FinClient = 2,
-    FinServer = 3,
+    FinClient = 2,  // i.e. engine
+    FinServer = 3,  // i.e. DUT
     RstServer = 4,
     MaxCauses = 5,
 }
@@ -152,8 +154,11 @@ pub enum ReleaseCause {
 #[derive(Clone)]
 pub struct ConRecord {
     pub port: u16,
+    pub sock: Option<SocketAddrV4>,
     c_count: usize,
     c_state: [TcpState;8],
+    s_count: usize,
+    s_state: [TcpState;8],
     stamps: [u64;8],
     pub server_index: usize,
     release_cause: ReleaseCause,
@@ -161,11 +166,14 @@ pub struct ConRecord {
 
 impl ConRecord {
     #[inline]
-    fn init(&mut self, proxy_sport: u16) {
-        self.port = proxy_sport;
+    fn init(&mut self, port: u16, sock: Option<SocketAddrV4>) {
+        self.port = port;
         self.c_count = 1;
+        self.s_count= 1;
         self.c_state[0]=TcpState::Closed;
+        self.s_state[0]=TcpState::Closed;
         self.server_index= 0;
+        self.sock=sock;
     }
     #[inline]
     pub fn c_released(&mut self, cause: ReleaseCause) {
@@ -183,8 +191,11 @@ impl ConRecord {
             // we are using an Array, not Vec for the state history, the latter eats too much performance
             c_count:0,
             c_state: [TcpState::Closed;8],
+            s_count:0,
+            s_state: [TcpState::Closed;8],
             stamps: [0;8],
             port: 0u16,
+            sock: None,
         }
     }
 
@@ -196,12 +207,26 @@ impl ConRecord {
     }
 
     #[inline]
+    pub fn push_s_state(&mut self, state: TcpState) {
+        self.s_state[self.s_count]=state;
+        //self.s_stamps[self.c_count] = utils::rdtsc_unsafe();
+        self.s_count+=1;
+    }
+    #[inline]
     pub fn last_c_state(&self) -> &TcpState {
         &self.c_state[self.c_count-1]
     }
 
     #[inline]
     pub fn c_states(&self) -> &[TcpState] { &self.c_state[0..self.c_count] }
+
+    #[inline]
+    pub fn last_s_state(&self) -> &TcpState {
+        &self.s_state[self.s_count-1]
+    }
+
+    #[inline]
+    pub fn s_states(&self) -> &[TcpState] { &self.s_state[0..self.s_count] }
 
     pub fn elapsed_since_synsent(&self) -> Vec<u64> {
         let synsent=self.stamps[1];
@@ -216,9 +241,10 @@ impl fmt::Display for ConRecord {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Connection(port={}, {:?}, {:?}, {}, {:?})",
+            "Connection(port={}, {:?}/{:?}, {:?}, {}, {:?})",
             self.port,
             self.c_states(),
+            self.s_states(),
             self.release_cause,
             self.stamps[1].separated_string(),
             self.elapsed_since_synsent().iter().map(|u| u.separated_string()).collect::<Vec<_>>(),
@@ -229,27 +255,37 @@ impl fmt::Display for ConRecord {
 #[derive(Clone)]
 pub struct Connection {
     pub con_rec: ConRecord,
-    pub c_seqn: u32,
+    pub c_seqn: u32,          // client side sequence no towards DUT
+    pub s_seqn: u32,          // server side sequence no towards DUT
+    pub dut_mac: MacHeader    // server side mac, i.e. mac of DUT
 }
 
 impl Connection {
     #[inline]
-    fn initialize(&mut self, proxy_sport: u16) {
+    fn initialize(&mut self, sock: Option<SocketAddrV4>, port: u16) {
         self.c_seqn = 0;
-        self.con_rec.init(proxy_sport);
+        self.s_seqn = 0;
+        self.dut_mac = MacHeader::default();
+        self.con_rec.init(port, sock);
     }
 
     fn new() -> Connection {
         Connection {
             c_seqn: 0,
+            s_seqn: 0,
+            dut_mac: MacHeader::default(),
             con_rec: ConRecord::new(),
         }
     }
 
     #[inline]
-    pub fn con_established(&mut self) {
+    pub fn c_con_established(&mut self) {
         self.con_rec.push_c_state(TcpState::Established);
-        //self.con_rec.push_s_state(TcpState::Established);
+    }
+
+    #[inline]
+    pub fn s_con_established(&mut self) {
+        self.con_rec.push_s_state(TcpState::Established);
     }
 
     #[inline]
@@ -266,6 +302,16 @@ impl Connection {
     #[inline]
     pub fn set_p_port(&mut self, port: u16) {
         self.con_rec.port = port;
+    }
+
+    #[inline]
+    pub fn get_dut_sock(&self) -> Option<&SocketAddrV4> {
+        self.con_rec.sock.as_ref()
+    }
+
+    #[inline]
+    pub fn set_dut_sock(&mut self, dut_sock: SocketAddrV4) {
+        self.con_rec.sock = Some(dut_sock);
     }
 
 }
@@ -289,16 +335,18 @@ pub struct ConnectionManager {
     con_records: Vec<ConRecord>,
     free_ports: VecDeque<u16>,
     port2con: Vec<Connection>,
+    sock2port: HashMap<SocketAddrV4, u16>,
     timeouts: Timeouts,
     pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
     pipeline_id: PipelineId,
     tx: Sender<MessageFrom>,
     tcp_port_base: u16,
+    special_port: u16,  // e.g. used as a listen port, not assigned by create
 }
 
 fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16) -> u16 {
     let port_mask = pci.port.get_tcp_dst_port_mask();
-    debug!("port_mask= {}", port_mask);
+    //debug!("port_mask= 0x{:x}", port_mask);
     port_mask - count * (!port_mask + 1)
 }
 
@@ -315,26 +363,26 @@ impl ConnectionManager {
         let max_tcp_port: u16 = tcp_port_base + !port_mask;
         // program the NIC to send all flows for our owned ports to our rx queue
         pci.port.add_fdir_filter(pci.rxq() as u16, engine_config.get_l234data().ip, tcp_port_base).unwrap();
-        let mut cm = ConnectionManager {
+        let cm = ConnectionManager {
             con_records: Vec::with_capacity(100000),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
+            sock2port: HashMap::with_capacity((!port_mask + 1) as usize),
             free_ports: (tcp_port_base..max_tcp_port).collect(),
             timeouts: Timeouts::default_or_some(&engine_config.timeouts),
             pci,
             pipeline_id,
             tx,
             tcp_port_base,
+            special_port: max_tcp_port,
         };
-        // need to add last port this way to avoid overflow with slice, when max_tcp_port == 65535
-        cm.free_ports.push_back(max_tcp_port);
-        //        cm.spawn_maintenance_thread();
         debug!(
-            "created ConnectionManager {} for port {}, rxq {} and tcp ports {} - {}",
+            "created ConnectionManager {} for port {}, rxq {} and tcp ports {} - {}, special port= {}",
             old_manager_count,
             PacketRx::port_id(&cm.pci),
             cm.pci.rxq(),
             cm.free_ports.front().unwrap(),
             cm.free_ports.back().unwrap(),
+            cm.special_port(),
         );
         cm
     }
@@ -352,30 +400,11 @@ impl ConnectionManager {
     pub fn tcp_port_base(&self) -> u16 {
         self.tcp_port_base
     }
-    //fn tcp_port_mask(&self) -> u16 { self.tcp_port_mask }
 
-    /*fn get(&self, key: &CKey) -> Option<&Connection> {
-        match *key {
-            CKey::Port(p) => {
-                if self.owns_tcp_port(p) {
-                    self.port2con.get(&p)
-                } else {
-                    None
-                }
-            }
-            CKey::Socket(s) => {
-                let port = self.sock2port.get(&s);
-                if port.is_some() {
-                    self.port2con.get(&port.unwrap())
-                } else {
-                    None
-                }
-            }
-        }
-    }
-    */
+    #[inline]
+    pub fn special_port(&self) -> u16 { self.special_port }
 
-    pub fn get_mut(&mut self, port: u16) -> Option<&mut Connection> {
+    pub fn get_mut_by_port(&mut self, port: u16) -> Option<&mut Connection> {
         if self.owns_tcp_port(port) {
             let c = self.get_mut_con(&port);
             // check if c has a port != 0 assigned
@@ -387,6 +416,47 @@ impl ConnectionManager {
                 None
             }
         } else {
+            None
+        }
+    }
+
+    pub fn get_mut_by_sock(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
+        let port = self.sock2port.get(sock);
+        if port.is_some() {
+            Some(&mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize])
+        } else {
+            None
+        }
+    }
+
+
+    pub fn get_mut_or_insert(&mut self, sock: SocketAddrV4, wheel: &mut TimerWheel<u16>) -> Option<&mut Connection> {
+        {
+            // we borrow sock2port here !
+            let port = self.sock2port.get(&sock);
+            if port.is_some() {
+                return Some(&mut self.port2con[(port.unwrap() - self.tcp_port_base) as usize]);
+            }
+        }
+        // now we are free to borrow sock2port mutably
+        let opt_port = self.free_ports.pop_front();
+        if opt_port.is_some() {
+            let port = opt_port.unwrap();
+            //let now;
+            {
+                let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
+                assert_eq!(cc.p_port(), 0);
+                cc.initialize(Some(sock), port);
+                //now = cc.con_rec.c_syn_recv;
+                debug!("tcp flow for {} created on port {:?}", sock, port);
+            }
+            //if self.timeouts.established.unwrap() < wheel.get_max_timeout_cycles() {
+            //    wheel.schedule(&(now + self.timeouts.established.unwrap()*MILLIS_TO_CYCLES), port);
+            //}
+            self.sock2port.insert(sock, port);
+            Some(self.get_mut_con(&port))
+        } else {
+            warn!("out of ports");
             None
         }
     }
@@ -429,7 +499,7 @@ impl ConnectionManager {
             {
                 let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
                 assert_eq!(cc.p_port(), 0);
-                cc.initialize(port);
+                cc.initialize(None, port);
                 //debug!("tcp flow created on port {:?}", port);
             }
             Some(self.get_mut_con(&port))

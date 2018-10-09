@@ -168,14 +168,17 @@ pub fn main() {
             mtx.send(MessageFrom::FetchCounter).unwrap();
             mtx.send(MessageFrom::FetchCRecords).unwrap();
 
-            let mut tcp_counters = HashMap::new();
+            let mut tcp_counters_to = HashMap::new();
+            let mut tcp_counters_from = HashMap::new();
             let mut con_records = HashMap::new();
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter)) => {
-                        info!("{}: {}", pipeline_id, tcp_counter);
-                        tcp_counters.insert(pipeline_id, tcp_counter);
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)) => {
+                        info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
+                        info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
+                        tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
+                        tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }
                     Ok(MessageTo::CRecords(pipeline_id, c_records)) => {
                         con_records.insert(pipeline_id, c_records);
