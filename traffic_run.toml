@@ -5,17 +5,14 @@ pool_size   = 2048              # default 2048
 cache_size  = 32                # default 32
 cores       = [ 1, 2, 3 ]
 ports       = [ 
-                    { name="7:00.0", rxd= 512, txd= 512, cores = [1, 2, 3], fdir = { pballoc=2, mode=2, ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFF"}, src_port_mask="0", dst_port_mask="C000"} } ,
+                    { name="7:00.0", rxd= 512, txd= 512, cores = [1, 2, 3], fdir = { pballoc="RteFdirPballoc256k", mode="RteFdirModePerfect", ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFF"}, src_port_mask="0", dst_port_mask="E000"} } ,
                     { name="kni:1", rxd=64, txd=64, cores = [1], k_cores = [1] }
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
 [trafficengine]
 
-engine      = { namespace="nskni", mac="8e:f7:35:7e:73:91", ipnet="192.168.222.1/24", port=19999, timeouts= { established= 1000 }  }
-#targets     = [ { id = "iperf3", ip = "192.168.222.3", linux_if="enp7s0f1" , port = 5201 },
-#              ]
-#sending to a black hole:
-targets     = [ { id = "iperf3", ip = "192.168.222.244", mac="8e:e7:34:8e:74:92" , port = 5201 },
+engine      = { namespace="nskni", mac="8e:f7:35:7e:73:91", ipnet="192.168.222.2/24", port=19999, timeouts= { established= 1800 }  }
+targets     = [ { id = "proxy", ip = "192.168.222.1", mac="3c:fd:fe:9e:ce:4c" , port = 19999 },
               ]
 test_size   = 32

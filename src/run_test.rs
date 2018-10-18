@@ -211,7 +211,7 @@ pub fn run_test(test_type: TestType) {
                             debug!("test connection {}: TCP connect to engine successful", ntry);
                             stream.set_write_timeout(Some(timeout)).unwrap();
                             stream.set_read_timeout(Some(timeout)).unwrap();
-                            stream.shutdown(Shutdown::Both);
+                            stream.shutdown(Shutdown::Both).unwrap();
                             /*match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
                                 Ok(_) => {
                                     debug!("successfully send {} stars", ntry);
