@@ -13,13 +13,12 @@ path = "src/bin.rs"
 
 
 [dependencies]
-e2d2 = { version = ">=0.3.1", path = "../../gitclones/NetBricks/framework", features = ["performance"] }
+e2d2 = { version = "=0.3.2", path = "../../work/NetBricks/framework", features = ["performance"] }
 rand = "0.3"
 fnv = "*"
 log = "0.4"
 env_logger = "0.5"
-nix = "0.10.0"
-ctrlc = { version = "~3", features = ["termination"] }
+ctrlc = { version = ">=3.1", features = ["termination"] }
 time = ">=0.1.0"
 ipnet = "1.0"
 toml = "0.4"

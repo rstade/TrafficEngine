@@ -1,6 +1,4 @@
 #!/bin/bash
-sudo ip addr add 192.168.222.3/24 dev enp7s0f1
-
 set -e
 
 if [ $# -ge 1 ]; then

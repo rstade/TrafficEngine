@@ -14,7 +14,7 @@ use e2d2::native::zcsi::*;
 use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 
-use traffic_lib::{get_mac_from_ifname, print_hard_statistics, read_config, setup_pipelines};
+use traffic_lib::{get_mac_from_ifname, read_config, setup_pipelines, initialize_flowdirector};
 use traffic_lib::errors::*;
 use traffic_lib::L234Data;
 use traffic_lib::{MessageFrom, MessageTo};
@@ -124,7 +124,7 @@ pub fn main() {
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
-            print_hard_statistics(1u16);
+            let flowdirector_map=initialize_flowdirector(&context, &configuration);
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
@@ -142,6 +142,7 @@ pub fn main() {
                         s,
                         &config_cloned.engine,
                         l234data.clone(),
+                        flowdirector_map.clone(),
                         mtx_clone.clone(),
                     );
                 },
@@ -163,7 +164,7 @@ pub fn main() {
                 thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
             }
 
-            mtx.send(MessageFrom::PrintPerformance(vec![1,2])).unwrap();
+            mtx.send(MessageFrom::PrintPerformance(vec![1, 2])).unwrap();
             thread::sleep(Duration::from_millis(100 as u64));
             mtx.send(MessageFrom::FetchCounter).unwrap();
             mtx.send(MessageFrom::FetchCRecords).unwrap();
@@ -184,7 +185,9 @@ pub fn main() {
                         con_records.insert(pipeline_id, c_records);
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                    Err(RecvTimeoutError::Timeout) =>  { break; }
+                    Err(RecvTimeoutError::Timeout) => {
+                        break;
+                    }
                     Err(e) => {
                         error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
                         break;
@@ -192,21 +195,17 @@ pub fn main() {
                 }
             }
 
-            for (p,c_records) in con_records {
+            for (p, c_records) in con_records {
                 let mut completed_count = 0;
                 debug!("Pipeline {}:", p);
-                c_records.iter().enumerate().for_each( |(i,c)| {
+                c_records.iter().enumerate().for_each(|(i, c)| {
                     debug!("{:6}: {}", i, c);
-                    if c.get_release_cause() == ReleaseCause::FinServer
-                        && c.c_states().last().unwrap() == &TcpState::Closed
-                        {
-                            completed_count += 1
-                        };
+                    if c.get_release_cause() == ReleaseCause::FinServer && c.c_states().last().unwrap() == &TcpState::Closed {
+                        completed_count += 1
+                    };
                 });
                 debug!("{} completed connections", completed_count);
             }
-
-
 
             mtx.send(MessageFrom::Exit).unwrap();
 

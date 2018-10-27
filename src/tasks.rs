@@ -19,14 +19,15 @@ pub struct KniHandleRequest {
 impl Executable for KniHandleRequest {
     fn execute(&mut self) -> u32 {
         let now = utils::rdtsc_unsafe();
-        if now-self.last_tick >= 22700*1000 {
+        if now - self.last_tick >= 22700 * 1000 {
             unsafe {
                 rte_kni_handle_request(self.kni_port.get_kni());
             };
-            self.last_tick=now;
+            self.last_tick = now;
             1
+        } else {
+            0
         }
-        else { 0 }
     }
 }
 
@@ -88,7 +89,7 @@ impl PacketInjector {
             //            tx,
         }
     }
-/*
+    /*
     #[inline]
     pub fn create_packet(&mut self) -> Packet<TcpHeader, EmptyMetadata> {
         let p = unsafe { self.packet_prototype.copy() };
@@ -104,7 +105,7 @@ impl PacketInjector {
 
 impl Executable for PacketInjector {
     fn execute(&mut self) -> u32 {
-        let mut inserted=0;
+        let mut inserted = 0;
         if self.no_packets == 0 || self.sent_packets < self.no_packets {
             let mut mbuf_ptr_array = Vec::<*mut MBuf>::with_capacity(INJECTOR_BATCH_SIZE);
             let ret = unsafe { mbuf_alloc_bulk(mbuf_ptr_array.as_mut_ptr(), INJECTOR_BATCH_SIZE as u32) };
@@ -113,7 +114,7 @@ impl Executable for PacketInjector {
             for i in 0..INJECTOR_BATCH_SIZE {
                 self.create_packet_from_mbuf(mbuf_ptr_array[i]);
             }
-            inserted=self.producer.enqueue_mbufs(&mbuf_ptr_array);
+            inserted = self.producer.enqueue_mbufs(&mbuf_ptr_array);
             self.sent_packets += inserted;
             //if inserted < INJECTOR_BATCH_SIZE {
             //    debug!("PacketInjector buffer full, inserted= {}", inserted);
@@ -128,19 +129,17 @@ impl Executable for PacketInjector {
                     self.used_cycles[1],
                 )).unwrap();
             } else { self.used_cycles[0] += utils::rdtsc_unsafe() - begin };
-            */
-        }
+            */        }
         inserted as u32
     }
 }
-
 
 pub struct TickGenerator {
     packet_prototype: Packet<TcpHeader, EmptyMetadata>,
     producer: MpscProducer,
     last_tick: u64,
     tick_length: u64, // in cycles
-    tick_count: u64
+    tick_count: u64,
 }
 
 #[allow(dead_code)]
@@ -177,9 +176,9 @@ impl TickGenerator {
         TickGenerator {
             packet_prototype,
             producer,
-            last_tick:0,
-            tick_count:0,
-            tick_length: tick_length_1000*1000,
+            last_tick: 0,
+            tick_count: 0,
+            tick_length: tick_length_1000 * 1000,
         }
     }
 
@@ -195,16 +194,19 @@ impl TickGenerator {
 }
 
 impl Executable for TickGenerator {
-    fn execute(&mut self) -> u32  {
+    fn execute(&mut self) -> u32 {
         let p;
         let now = utils::rdtsc_unsafe();
-        if now-self.last_tick >= self.tick_length {
-            unsafe { p = self.packet_prototype.copy(); }
+        if now - self.last_tick >= self.tick_length {
+            unsafe {
+                p = self.packet_prototype.copy();
+            }
             self.producer.enqueue_one(p);
             self.last_tick = now;
-            self.tick_count+=1;
+            self.tick_count += 1;
             1
+        } else {
+            0
         }
-        else { 0 }
     }
 }

@@ -11,7 +11,7 @@ use std::mem;
 
 use e2d2::headers::MacHeader;
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{PacketRx, PortQueue};
+use e2d2::interface::{PacketRx, PortQueue, L4Flow};
 use e2d2::utils;
 
 use eui48::MacAddress;
@@ -34,23 +34,23 @@ pub enum TcpState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TcpControls {
-    SentSyn=0,
-    SentSynAck=1,
-    SentSynAck2=2,
-    SentFin=3,
-    SentFinAck=4,
-    SentFinAck2=5,
-    SentAck=6,
-    RecvSyn=7,
-    RecvSynAck=8,
-    RecvSynAck2=9,
-    RecvFin=10,
-    RecvFinAck=11,
-    RecvFinAck2=12,
-    RecvAck=13,
-    RecvRst=14,
-    Unexpected=15,
-    Count=16
+    SentSyn = 0,
+    SentSynAck = 1,
+    SentSynAck2 = 2,
+    SentFin = 3,
+    SentFinAck = 4,
+    SentFinAck2 = 5,
+    SentAck = 6,
+    RecvSyn = 7,
+    RecvSynAck = 8,
+    RecvSynAck2 = 9,
+    RecvFin = 10,
+    RecvFinAck = 11,
+    RecvFinAck2 = 12,
+    RecvAck = 13,
+    RecvRst = 14,
+    Unexpected = 15,
+    Count = 16,
 }
 
 impl convert::From<usize> for TcpControls {
@@ -66,13 +66,13 @@ impl convert::From<usize> for TcpControls {
             7 => TcpControls::RecvSyn,
             8 => TcpControls::RecvSynAck,
             9 => TcpControls::RecvSynAck2,
-           10 => TcpControls::RecvFin,
-           11 => TcpControls::RecvFinAck,
-           12 => TcpControls::RecvFinAck2,
-           13 => TcpControls::RecvAck,
-           14 => TcpControls::RecvRst,
-           15 => TcpControls::Unexpected,
-           16 => TcpControls::Count,
+            10 => TcpControls::RecvFin,
+            11 => TcpControls::RecvFinAck,
+            12 => TcpControls::RecvFinAck2,
+            13 => TcpControls::RecvAck,
+            14 => TcpControls::RecvRst,
+            15 => TcpControls::Unexpected,
+            16 => TcpControls::Count,
             _ => TcpControls::SentSyn,
         }
     }
@@ -80,13 +80,13 @@ impl convert::From<usize> for TcpControls {
 
 impl fmt::Display for TcpControls {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut output= String::new();
+        let mut output = String::new();
         write!(&mut output, "{:?}", self)?;
         write!(f, "{:12}", output)
     }
 }
 
-#[derive(Debug, Clone,)]
+#[derive(Debug, Clone)]
 pub struct TcpCounter {
     counter: [usize; TcpControls::Count as usize],
 }
@@ -94,7 +94,7 @@ pub struct TcpCounter {
 impl TcpCounter {
     pub fn new() -> TcpCounter {
         TcpCounter {
-            counter: [0; TcpControls::Count as usize]
+            counter: [0; TcpControls::Count as usize],
         }
     }
 }
@@ -102,26 +102,23 @@ impl TcpCounter {
 impl Index<TcpControls> for TcpCounter {
     type Output = usize;
 
-    fn index(&self, tcp_control:TcpControls) ->  &usize {
+    fn index(&self, tcp_control: TcpControls) -> &usize {
         &self.counter[tcp_control as usize]
     }
 }
 
 impl IndexMut<TcpControls> for TcpCounter {
-    fn index_mut(&mut self, tcp_control:TcpControls) ->  &mut usize {
+    fn index_mut(&mut self, tcp_control: TcpControls) -> &mut usize {
         &mut self.counter[tcp_control as usize]
     }
 }
 
 impl fmt::Display for TcpCounter {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(
-            f,
-            "Tcp Counters: ",
-        )?;
+        writeln!(f, "Tcp Counters: ",)?;
         for i in 0..TcpControls::Count as usize {
             writeln!(f, "{:12} = {:6}", TcpControls::from(i), self.counter[i])?;
-        };
+        }
         Ok(())
     }
 }
@@ -145,8 +142,8 @@ pub trait UserData: Send + Sync + 'static {
 pub enum ReleaseCause {
     Unknown = 0,
     Timeout = 1,
-    FinClient = 2,  // i.e. engine
-    FinServer = 3,  // i.e. DUT
+    FinClient = 2, // i.e. engine
+    FinServer = 3, // i.e. DUT
     RstServer = 4,
     MaxCauses = 5,
 }
@@ -156,10 +153,10 @@ pub struct ConRecord {
     pub port: u16,
     pub sock: Option<SocketAddrV4>,
     c_count: usize,
-    c_state: [TcpState;8],
+    c_state: [TcpState; 8],
     s_count: usize,
-    s_state: [TcpState;8],
-    stamps: [u64;8],
+    s_state: [TcpState; 8],
+    stamps: [u64; 8],
     pub server_index: usize,
     release_cause: ReleaseCause,
 }
@@ -169,11 +166,11 @@ impl ConRecord {
     fn init(&mut self, port: u16, sock: Option<SocketAddrV4>) {
         self.port = port;
         self.c_count = 1;
-        self.s_count= 1;
-        self.c_state[0]=TcpState::Closed;
-        self.s_state[0]=TcpState::Closed;
-        self.server_index= 0;
-        self.sock=sock;
+        self.s_count = 1;
+        self.c_state[0] = TcpState::Closed;
+        self.s_state[0] = TcpState::Closed;
+        self.server_index = 0;
+        self.sock = sock;
     }
     #[inline]
     pub fn c_released(&mut self, cause: ReleaseCause) {
@@ -189,11 +186,11 @@ impl ConRecord {
             server_index: 0,
             release_cause: ReleaseCause::Unknown,
             // we are using an Array, not Vec for the state history, the latter eats too much performance
-            c_count:0,
-            c_state: [TcpState::Closed;8],
-            s_count:0,
-            s_state: [TcpState::Closed;8],
-            stamps: [0;8],
+            c_count: 0,
+            c_state: [TcpState::Closed; 8],
+            s_count: 0,
+            s_state: [TcpState::Closed; 8],
+            stamps: [0; 8],
             port: 0u16,
             sock: None,
         }
@@ -201,39 +198,44 @@ impl ConRecord {
 
     #[inline]
     pub fn push_c_state(&mut self, state: TcpState) {
-        self.c_state[self.c_count]=state;
+        self.c_state[self.c_count] = state;
         self.stamps[self.c_count] = utils::rdtsc_unsafe();
-        self.c_count+=1;
+        self.c_count += 1;
     }
 
     #[inline]
     pub fn push_s_state(&mut self, state: TcpState) {
-        self.s_state[self.s_count]=state;
+        self.s_state[self.s_count] = state;
         //self.s_stamps[self.c_count] = utils::rdtsc_unsafe();
-        self.s_count+=1;
+        self.s_count += 1;
     }
     #[inline]
     pub fn last_c_state(&self) -> &TcpState {
-        &self.c_state[self.c_count-1]
+        &self.c_state[self.c_count - 1]
     }
 
     #[inline]
-    pub fn c_states(&self) -> &[TcpState] { &self.c_state[0..self.c_count] }
+    pub fn c_states(&self) -> &[TcpState] {
+        &self.c_state[0..self.c_count]
+    }
 
     #[inline]
     pub fn last_s_state(&self) -> &TcpState {
-        &self.s_state[self.s_count-1]
+        &self.s_state[self.s_count - 1]
     }
 
     #[inline]
-    pub fn s_states(&self) -> &[TcpState] { &self.s_state[0..self.s_count] }
+    pub fn s_states(&self) -> &[TcpState] {
+        &self.s_state[0..self.s_count]
+    }
 
     pub fn elapsed_since_synsent(&self) -> Vec<u64> {
-        let synsent=self.stamps[1];
+        let synsent = self.stamps[1];
         if self.c_count >= 3 {
-            self.stamps[2..self.c_count].iter().map(|stamp| stamp-synsent).collect()
+            self.stamps[2..self.c_count].iter().map(|stamp| stamp - synsent).collect()
+        } else {
+            vec![]
         }
-        else { vec![] }
     }
 }
 
@@ -247,7 +249,10 @@ impl fmt::Display for ConRecord {
             self.s_states(),
             self.release_cause,
             self.stamps[1].separated_string(),
-            self.elapsed_since_synsent().iter().map(|u| u.separated_string()).collect::<Vec<_>>(),
+            self.elapsed_since_synsent()
+                .iter()
+                .map(|u| u.separated_string())
+                .collect::<Vec<_>>(),
         )
     }
 }
@@ -255,9 +260,9 @@ impl fmt::Display for ConRecord {
 #[derive(Clone)]
 pub struct Connection {
     pub con_rec: ConRecord,
-    pub c_seqn: u32,          // client side sequence no towards DUT
-    pub s_seqn: u32,          // server side sequence no towards DUT
-    pub dut_mac: MacHeader    // server side mac, i.e. mac of DUT
+    pub c_seqn: u32,        // client side sequence no towards DUT
+    pub s_seqn: u32,        // server side sequence no towards DUT
+    pub dut_mac: MacHeader, // server side mac, i.e. mac of DUT
 }
 
 impl Connection {
@@ -300,6 +305,11 @@ impl Connection {
     }
 
     #[inline]
+    pub fn in_use(&self) -> bool {
+        self.con_rec.port != 0
+    }
+
+    #[inline]
     pub fn set_p_port(&mut self, port: u16) {
         self.con_rec.port = port;
     }
@@ -313,7 +323,6 @@ impl Connection {
     pub fn set_dut_sock(&mut self, dut_sock: SocketAddrV4) {
         self.con_rec.sock = Some(dut_sock);
     }
-
 }
 
 impl fmt::Display for Connection {
@@ -341,13 +350,8 @@ pub struct ConnectionManager {
     pipeline_id: PipelineId,
     tx: Sender<MessageFrom>,
     tcp_port_base: u16,
-    special_port: u16,  // e.g. used as a listen port, not assigned by create
-}
-
-fn get_tcp_port_base_by_manager_count(pci: &CacheAligned<PortQueue>, count: u16) -> u16 {
-    let port_mask = pci.port.get_tcp_dst_port_mask();
-    //debug!("port_mask= 0x{:x}", port_mask);
-    port_mask - count * (!port_mask + 1)
+    special_port: u16, // e.g. used as a listen port, not assigned by create
+    ip: u32,    // ip address to use for connections of this manager
 }
 
 impl ConnectionManager {
@@ -355,14 +359,13 @@ impl ConnectionManager {
         pipeline_id: PipelineId,
         pci: CacheAligned<PortQueue>,
         engine_config: &EngineConfig,
+        l4flow: &L4Flow,
         tx: Sender<MessageFrom>,
     ) -> ConnectionManager {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
+        let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
-        let tcp_port_base: u16 = get_tcp_port_base_by_manager_count(&pci, old_manager_count);
         let max_tcp_port: u16 = tcp_port_base + !port_mask;
-        // program the NIC to send all flows for our owned ports to our rx queue
-        pci.port.add_fdir_filter(pci.rxq() as u16, engine_config.get_l234data().ip, tcp_port_base).unwrap();
         let cm = ConnectionManager {
             con_records: Vec::with_capacity(100000),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
@@ -374,15 +377,17 @@ impl ConnectionManager {
             tx,
             tcp_port_base,
             special_port: max_tcp_port,
+            ip,
         };
+        // we use the port with # max_tcp_port for returning traffic to us, do not add it to free_ports
         debug!(
-            "created ConnectionManager {} for port {}, rxq {} and tcp ports {} - {}, special port= {}",
+            "created ConnectionManager {} for port {}, rxq {}, ip= {}, tcp ports {} - {}",
             old_manager_count,
             PacketRx::port_id(&cm.pci),
             cm.pci.rxq(),
+            Ipv4Addr::from(ip),
             cm.free_ports.front().unwrap(),
             cm.free_ports.back().unwrap(),
-            cm.special_port(),
         );
         cm
     }
@@ -402,7 +407,9 @@ impl ConnectionManager {
     }
 
     #[inline]
-    pub fn special_port(&self) -> u16 { self.special_port }
+    pub fn special_port(&self) -> u16 {
+        self.special_port
+    }
 
     pub fn get_mut_by_port(&mut self, port: u16) -> Option<&mut Connection> {
         if self.owns_tcp_port(port) {
@@ -429,8 +436,7 @@ impl ConnectionManager {
         }
     }
 
-
-    pub fn get_mut_or_insert(&mut self, sock: SocketAddrV4, wheel: &mut TimerWheel<u16>) -> Option<&mut Connection> {
+    pub fn get_mut_or_insert(&mut self, sock: SocketAddrV4, _wheel: &mut TimerWheel<u16>) -> Option<&mut Connection> {
         {
             // we borrow sock2port here !
             let port = self.sock2port.get(&sock);
@@ -461,7 +467,8 @@ impl ConnectionManager {
         }
     }
 
-    pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<u16>)  {
+    //TODO allow for more precise time out conditions, currently whole TCP connections are timed out, also we should send a RST
+    pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<u16>) {
         loop {
             match wheel.tick(now) {
                 (Some(mut drain), more) => {
@@ -485,8 +492,10 @@ impl ConnectionManager {
     fn timeout(&mut self, port: u16) {
         {
             let c = self.get_mut_con(&port);
-            c.con_rec.c_released(ReleaseCause::Timeout);
-            c.con_rec.push_c_state(TcpState::Closed)
+            if c.in_use() {
+                c.con_rec.c_released(ReleaseCause::Timeout);
+                c.con_rec.push_c_state(TcpState::Closed);
+            }
         }
         self.release_port(port);
     }
@@ -497,7 +506,7 @@ impl ConnectionManager {
         if opt_port.is_some() {
             let port = opt_port.unwrap();
             {
-                let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
+                let cc = self.get_mut_con(&port);
                 assert_eq!(cc.p_port(), 0);
                 cc.initialize(None, port);
                 //debug!("tcp flow created on port {:?}", port);
@@ -512,27 +521,39 @@ impl ConnectionManager {
     pub fn release_port(&mut self, port: u16) {
         let c = &mut self.port2con[(port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
-        if c.p_port() != 0 {
+        if c.in_use() {
             self.con_records.push(c.con_rec.clone());
             self.free_ports.push_back(port);
             assert_eq!(port, c.p_port());
             c.set_p_port(0u16); // this indicates an unused connection,
-            // we keep unused connection in port2con table
+                                // we keep unused connection in port2con table
         }
     }
 
     // pushes all uncompleted connections to the connection record store
     pub fn record_uncompleted(&mut self) {
-        let c_records=&mut self.con_records;
-        self.port2con.iter().for_each(|c| if c.p_port()!=0  { c_records.push(c.con_rec.clone());} );
+        let c_records = &mut self.con_records;
+        self.port2con.iter().for_each(|c| {
+            if c.p_port() != 0 {
+                c_records.push(c.con_rec.clone());
+            }
+        });
     }
 
     #[allow(dead_code)]
     pub fn dump_records(&mut self) {
         info!("{}: {:6} closed connections", self.pipeline_id, self.con_records.len());
-        self.con_records.iter().enumerate().for_each(|(i,c)| debug!("{:6}: {}", i, c) );
-        info!("{}: {:6} open connections", self.pipeline_id, self.port2con.iter().filter(|c| c.p_port() !=0).collect::<Vec<_>>().len());
-        self.port2con.iter().enumerate().for_each(|(i,c)| if c.p_port()!=0 { info!("{:6}: {}", i, c.con_rec)} );
+        self.con_records.iter().enumerate().for_each(|(i, c)| debug!("{:6}: {}", i, c));
+        info!(
+            "{}: {:6} open connections",
+            self.pipeline_id,
+            self.port2con.iter().filter(|c| c.p_port() != 0).collect::<Vec<_>>().len()
+        );
+        self.port2con.iter().enumerate().for_each(|(i, c)| {
+            if c.p_port() != 0 {
+                info!("{:6}: {}", i, c.con_rec)
+            }
+        });
     }
 
     pub fn fetch_c_records(&mut self) -> Vec<ConRecord> {

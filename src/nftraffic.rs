@@ -1,5 +1,5 @@
-use e2d2::operators::*;
-use e2d2::scheduler::*;
+use e2d2::operators::{ReceiveBatch, Batch, merge, merge_with_selector,};
+use e2d2::scheduler::{Executable, Runnable, Scheduler, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::*;
@@ -8,105 +8,21 @@ use e2d2::queues::{new_mpsc_queue_pair};
 use e2d2::headers::EndOffset;
 use e2d2::utils;
 
-use std::process::Command;
 use std::cmp::min;
 use std::sync::mpsc::{Sender, channel};
+use std::sync::Arc;
 use std::net::{SocketAddrV4, Ipv4Addr};
+use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use cmanager::*;
+use cmanager::{TcpState, TcpControls, TcpCounter, Connection, L234Data, ConnectionManager, ReleaseCause};
 use EngineConfig;
+use is_kni_core;
 use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, PacketInjector, TickGenerator};
 use timer_wheel::{MILLIS_TO_CYCLES, TimerWheel};
 
-//const MIN_FRAME_SIZE: usize = 60; // without fcs
-
-pub fn is_kni_core(pci: &CacheAligned<PortQueue>) -> bool {
-    pci.rxq() == 0
-}
-
-pub fn setup_kni(kni_name: &str, ip_address: &str, mac_address: &str, kni_netns: &str) {
-    debug!("setup_kni");
-    //# ip link set dev vEth1 address XX:XX:XX:XX:XX:XX
-    let output = Command::new("ip")
-        .args(&["link", "set", "dev", kni_name, "address", mac_address])
-        .output()
-        .expect("failed to assign MAC address to kni i/f");
-    let reply = output.stderr;
-
-    debug!(
-        "assigning MAC addr {} to {}: {}, {}",
-        mac_address,
-        kni_name,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-
-    //# ip netns add nskni
-    let output = Command::new("ip")
-        .args(&["netns", "add", kni_netns])
-        .output()
-        .expect("failed to create namespace for kni i/f");
-    let reply = output.stderr;
-
-    debug!(
-        "creating network namespace {}: {}, {}",
-        kni_netns,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-
-    // ip link set dev vEth1 netns nskni
-    let output = Command::new("ip")
-        .args(&["link", "set", "dev", kni_name, "netns", kni_netns])
-        .output()
-        .expect("failed to move kni i/f to namespace");
-    let reply = output.stderr;
-
-    debug!(
-        "moving kni i/f {} to namesapce {}: {}, {}",
-        kni_name,
-        kni_netns,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-
-    // e.g. ip netns exec nskni ip addr add w.x.y.z/24 dev vEth1
-    let output = Command::new("ip")
-        .args(&["netns", "exec", kni_netns, "ip", "addr", "add", ip_address, "dev", kni_name])
-        .output()
-        .expect("failed to assign IP address to kni i/f");
-    let reply = output.stderr;
-    debug!(
-        "assigning IP addr {} to {}: {}, {}",
-        ip_address,
-        kni_name,
-        output.status,
-        String::from_utf8_lossy(&reply)
-    );
-    // e.g. ip netns exec nskni ip link set dev vEth1 up
-    let output1 = Command::new("ip")
-        .args(&["netns", "exec", kni_netns, "ip", "link", "set", "dev", kni_name, "up"])
-        .output()
-        .expect("failed to set kni i/f up");
-    let reply1 = output1.stderr;
-    debug!(
-        "ip netns exec {} ip link set dev {} up: {}, {}",
-        kni_netns,
-        kni_name,
-        output1.status,
-        String::from_utf8_lossy(&reply1)
-    );
-    // e.g. ip netns exec nskni ip addr show dev vEth1
-    let output2 = Command::new("ip")
-        .args(&["netns", "exec", kni_netns, "ip", "addr", "show", "dev", kni_name])
-        .output()
-        .expect("failed to show IP address of kni i/f");
-    let reply2 = output2.stdout;
-    info!("show IP addr: {}\n {}", output.status, String::from_utf8_lossy(&reply2));
-}
 
 #[allow(dead_code)]
 #[allow(unused_variables)]
@@ -118,6 +34,7 @@ pub fn setup_generator(
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
+    flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
 ) {
     fn install_task<T: Executable + 'static>(
@@ -133,7 +50,9 @@ pub fn setup_generator(
         tx.send(MessageFrom::Task(pipeline_id.clone(), uuid, task_type)).unwrap();
     }
 
-    let me = engine_config.get_l234data();
+    let mut me = engine_config.get_l234data();
+    let l4flow_for_this_core = flowdirector_map.get(&pci.port.port_id()).unwrap().get_flow(pci.rxq());
+    me.ip=l4flow_for_this_core.ip; // in case we use destination IP address for flow steering
 
     let pipeline_id = PipelineId {
         core: core as u16,
@@ -142,7 +61,12 @@ pub fn setup_generator(
     };
     debug!("enter setup_generator {}", pipeline_id);
 
-    let mut sm: ConnectionManager = ConnectionManager::new(pipeline_id.clone(), pci.clone(), &engine_config, tx.clone());
+    let mut sm: ConnectionManager = ConnectionManager::new(
+        pipeline_id.clone(),
+        pci.clone(),
+        &engine_config,
+        l4flow_for_this_core,
+        tx.clone());
 
     let timeouts = Timeouts::default_or_some(&engine_config.timeouts);
     let mut wheel = TimerWheel::new(128, 100 * MILLIS_TO_CYCLES, 128);
@@ -227,11 +151,19 @@ pub fn setup_generator(
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
+    //TODO calculate tick_length
     let tick_generator = TickGenerator::new(producer_timerticks, &me, 22700);
     assert!(wheel.resolution() > tick_generator.tick_length());
     let wheel_tick_reduction_factor = wheel.resolution() / tick_generator.tick_length();
     let mut ticks = 0;
-    install_task(sched, &tx, &pipeline_id, "TickGenerator", TaskType::TickGenerator, tick_generator);
+    install_task(
+        sched,
+        &tx,
+        &pipeline_id,
+        "TickGenerator",
+        TaskType::TickGenerator,
+        tick_generator,
+    );
 
     let pipeline_id_clone = pipeline_id.clone();
 
@@ -331,7 +263,12 @@ pub fn setup_generator(
                     }
                 }
 
-                fn  syn_received<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState, syn_counter: &usize) {
+                fn syn_received<M: Sized + Send>(
+                    p: &mut Packet<TcpHeader, M>,
+                    c: &mut Connection,
+                    h: &mut HeaderState,
+                    syn_counter: &usize,
+                ) {
                     c.con_rec.push_s_state(TcpState::SynReceived);
                     c.dut_mac = h.mac.clone();
                     c.set_dut_sock(SocketAddrV4::new(Ipv4Addr::from(h.ip.src()), h.tcp.src_port()));
@@ -346,13 +283,7 @@ pub fn setup_generator(
                     debug!("(SYN-)ACK to client, L3: { }, L4: { }", h.ip, h.tcp);
                 }
 
-
-                fn synack_received<M: Sized + Send>(
-                    p: &mut Packet<TcpHeader, M>,
-                    c: &mut Connection,
-                    h: &mut HeaderState,
-                    seqn_inc: u32,
-                ) {
+                fn synack_received<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState, seqn_inc: u32) {
                     make_reply_packet(h);
                     h.tcp.unset_syn_flag();
                     c.c_seqn = c.c_seqn.wrapping_add(seqn_inc);
@@ -413,7 +344,7 @@ pub fn setup_generator(
                     tcp: unsafe { &mut *(p.get_mut_header() as *mut TcpHeader) },
                 };
 
-                let hs_flow= hs.ip.flow().unwrap();
+                let hs_flow = hs.ip.flow().unwrap();
                 // if set by the following tcp state machine,
                 // the port/connection becomes released afterwards
                 // this is cumbersome, but we must make the  borrow checker happy
@@ -459,8 +390,11 @@ pub fn setup_generator(
                         match rx.try_recv() {
                             Ok(MessageTo::FetchCounter) => {
                                 tx_clone
-                                    .send(MessageFrom::Counter(pipeline_id_clone.clone(), counter_to.clone(), counter_from.clone()))
-                                    .unwrap();
+                                    .send(MessageFrom::Counter(
+                                        pipeline_id_clone.clone(),
+                                        counter_to.clone(),
+                                        counter_from.clone(),
+                                    )).unwrap();
                             }
                             Ok(MessageTo::FetchCRecords) => {
                                 sm.record_uncompleted();
@@ -479,7 +413,7 @@ pub fn setup_generator(
                         if hs.tcp.dst_port() == sm.special_port() {
                             let opt_c = if hs.tcp.syn_flag() {
                                 debug!("got SYN on special port 0x{:x}", sm.special_port());
-                                counter_from[TcpControls::RecvSyn]+=1;
+                                counter_from[TcpControls::RecvSyn] += 1;
                                 sm.get_mut_or_insert(hs_flow.src_socket_addr(), &mut wheel)
                             } else {
                                 sm.get_mut_by_sock(&hs_flow.src_socket_addr())
@@ -495,45 +429,46 @@ pub fn setup_generator(
                                     if old_s_state == TcpState::Closed {
                                         // replies with a SYN-ACK to client:
                                         syn_received(p, c, &mut hs, &mut counter_from[TcpControls::RecvSyn]);
-                                        counter_from[TcpControls::SentSynAck]+=1;
+                                        counter_from[TcpControls::SentSynAck] += 1;
                                         group_index = 1;
                                     } else {
-                                        warn!("received SYN in state {:?}", c.con_rec.s_states());
+                                        warn!("{} received SYN in state {:?}", thread_id_1, c.con_rec.s_states());
                                     }
                                 } else if hs.tcp.ack_flag() && old_s_state == TcpState::SynReceived {
                                     c.s_con_established();
-                                    counter_from[TcpControls::RecvSynAck2]+=1;
+                                    counter_from[TcpControls::RecvSynAck2] += 1;
                                     debug!(
                                         "{} connection from DUT ({:?}) established",
-                                        thread_id_1.clone(),
+                                        thread_id_1,
                                         hs_flow.src_socket_addr()
                                     );
                                 } else if hs.tcp.fin_flag() {
                                     if old_s_state >= TcpState::FinWait1 {
                                         // we got a FIN as a receipt to a sent FIN (engine closed connection)
                                         debug!("received FIN-reply from DUT {:?}", hs_flow.src_socket_addr());
-                                        counter_from[TcpControls::RecvFinAck]+=1;
+                                        counter_from[TcpControls::RecvFinAck] += 1;
                                         c.con_rec.push_s_state(TcpState::Closed);
-                                        // TODO sent a final Ack
+                                    // TODO sent a final Ack
                                     } else {
                                         // DUT wants to close connection
                                         debug!(
-                                            "DUT sends FIN on port {}/{} in state {:?}/{:?}",
+                                            "{} DUT sends FIN on port {}/{} in state {:?}/{:?}",
+                                            thread_id_1,
                                             hs.tcp.src_port(),
                                             c.p_port(),
                                             c.con_rec.last_c_state(),
                                             c.con_rec.last_s_state(),
                                         );
                                         c.con_rec.c_released(ReleaseCause::FinServer);
-                                        counter_from[TcpControls::RecvFin]+=1;
+                                        counter_from[TcpControls::RecvFin] += 1;
                                         c.con_rec.push_s_state(TcpState::LastAck);
                                         make_reply_packet(&mut hs);
                                         hs.tcp.set_ack_flag();
                                         c.s_seqn = c.s_seqn.wrapping_add(1);
                                         hs.tcp.set_seq_num(c.s_seqn);
                                         update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
-                                        debug!("FIN-ACK to DUT, L3: { }, L4: { }", hs.ip, hs.tcp);
-                                        counter_from[TcpControls::SentFinAck]+=1;
+                                        debug!("{} FIN-ACK to DUT, L3: { }, L4: { }", thread_id_1, hs.ip, hs.tcp);
+                                        counter_from[TcpControls::SentFinAck] += 1;
                                         group_index = 1;
                                     }
                                 } else if hs.tcp.rst_flag() {
@@ -553,8 +488,7 @@ pub fn setup_generator(
                                     release_connection = Some(c.p_port());
                                 }
                             }
-                        }
-                        else {
+                        } else {
                             // check that flow steering worked:
                             assert!(sm.owns_tcp_port(hs.tcp.dst_port()));
                             let mut c = sm.get_mut_by_port(hs.tcp.dst_port());
@@ -581,7 +515,7 @@ pub fn setup_generator(
                                         synack_received(p, &mut c, &mut hs, 0u32);
                                         counter_to[TcpControls::SentAck] += 1;
                                     } else {
-                                        warn!("received SYN-ACK in wrong state: {:?}", old_c_state);
+                                        warn!("{} received SYN-ACK in wrong state: {:?}",thread_id_1, old_c_state);
                                         group_index = 0;
                                     } // ignore the SynAck
                                 } else if hs.tcp.fin_flag() {
@@ -590,7 +524,7 @@ pub fn setup_generator(
                                         // got FIN receipt to a client initiated FIN
                                         debug!("received FIN-reply from server on port {}", hs.tcp.dst_port());
                                         c.con_rec.push_c_state(TcpState::Closed);
-                                        // TODO return an ACK
+                                    // TODO return an ACK
                                     } else {
                                         // server initiated TCP close
                                         /*
@@ -636,14 +570,20 @@ pub fn setup_generator(
                                 if b_unexpected {
                                     warn!(
                                         "{} unexpected server side TCP packet on port {} in client state {:?}, sending to KNI i/f",
-                                        thread_id_2,
+                                        thread_id_1,
                                         hs.tcp.dst_port(),
                                         c.con_rec.c_states(),
                                     );
                                     group_index = 2;
                                 }
                             } else {
-                                warn!("engine has no state on port {}, sending to KNI i/f", hs.tcp.dst_port());
+                                warn!("{} engine has no state for {}:{}, sending to KNI i/f",
+                                      thread_id_1,
+                                      hs.ip,
+                                      hs.tcp,
+                                      //Ipv4Addr::from(hs.ip.dst()),
+                                      // hs.tcp.dst_port(),
+                                );
                                 // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
                                 group_index = 2;
                             }
