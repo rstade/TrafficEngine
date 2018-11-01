@@ -1,5 +1,6 @@
 #!/bin/bash
-#sudo ip addr add 192.168.222.3/24 dev enp7s0f1
+#we flush the ARP cache because outdated ARP entries may let tests fail
+sudo ip -s -s neigh flush all
 export RUST_BACKTRACE=1
 export RUST_LOG="traffic_lib=debug,trafficengine=debug,e2d2=info"
 executable=`cargo build $1 --message-format=json | jq -r 'select((.profile.test == false) and (.target.name == "trafficengine")) | .filenames[]'`

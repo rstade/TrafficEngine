@@ -15,6 +15,7 @@ use std::net::{SocketAddrV4, Ipv4Addr};
 use std::collections::HashMap;
 
 use uuid::Uuid;
+use bincode::{serialize};
 
 use cmanager::{TcpState, TcpControls, TcpCounter, Connection, L234Data, ConnectionManager, ReleaseCause};
 use EngineConfig;
@@ -22,13 +23,15 @@ use is_kni_core;
 use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, PacketInjector, TickGenerator};
 use timer_wheel::{MILLIS_TO_CYCLES, TimerWheel};
+use std::sync::atomic::Ordering;
 
+const MIN_FRAME_SIZE: usize = 60; // without fcs
 
 #[allow(dead_code)]
 #[allow(unused_variables)]
 pub fn setup_generator(
     core: i32,
-    no_packets: usize, //# of batches to create per pipeline
+    nr_connections: usize, //# of connections to setup per pipeline
     pci: &CacheAligned<PortQueue>,
     kni: &CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
@@ -44,10 +47,11 @@ pub fn setup_generator(
         task_name: &str,
         task_type: TaskType,
         task: T,
-    ) {
+    ) -> Uuid {
         let uuid = Uuid::new_v4();
-        sched.add_runnable(Runnable::from_task(uuid, task_name.to_string(), task).unready());
+        sched.add_runnable(Runnable::from_task(uuid, task_name.to_string(), task).move_unready());
         tx.send(MessageFrom::Task(pipeline_id.clone(), uuid, task_type)).unwrap();
+        uuid
     }
 
     let mut me = engine_config.get_l234data();
@@ -72,7 +76,7 @@ pub fn setup_generator(
     let mut wheel = TimerWheel::new(128, 100 * MILLIS_TO_CYCLES, 128);
 
     // setting up a a reverse message channel between this pipeline and the main program thread
-    debug!("setting up reverse channel from pipeline {}", pipeline_id);
+    debug!("{} setting up reverse channel", pipeline_id);
     let (remote_tx, rx) = channel::<MessageTo>();
     // we send the transmitter to the remote receiver of our messages
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
@@ -88,7 +92,7 @@ pub fn setup_generator(
             .send(pci.clone());
         let uuid = Uuid::new_v4();
         let name = String::from("Kni2Pci");
-        sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).ready());
+        sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
     }
     let thread_id_0 = format!("<c{}, rx{}>: ", core, pci.rxq());
     let thread_id_1 = format!("<c{}, rx{}>: ", core, pci.rxq());
@@ -114,14 +118,19 @@ pub fn setup_generator(
     let pd_clone = me.clone();
     let uuid_l2groupby = Uuid::new_v4();
     let uuid_l2groupby_clone = uuid_l2groupby.clone();
+    let pipeline_ip=sm.ip();
     // group the traffic into TCP traffic addressed to Proxy (group 1),
     // and send all other traffic to KNI (group 0)
     let mut l2groups = l2filter_from_pci.group_by(
         2,
         box move |p| {
+            if p.get_header().etype() != 0x0800 {
+                // everything other than Ipv4 we send to KNI
+                return 0
+            }
             let payload = p.get_payload();
             let ipflow = ipv4_extract_flow(payload);
-            if ipflow.dst_ip == pd_clone.ip && ipflow.proto == 6 {
+            if (ipflow.dst_ip == pd_clone.ip || ipflow.dst_ip == pipeline_ip) && ipflow.proto == 6 {
                 if ipflow.dst_port == pd_clone.port || ipflow.dst_port >= tcp_min_port {
                     //debug!("{} our tcp flow: {}", thread_id_1, ipflow);
                     1
@@ -130,7 +139,13 @@ pub fn setup_generator(
                     0
                 }
             } else {
-                // debug!("{} ignored by engine: not a tcp flow or not addressed to us", thread_id_1);
+                debug!("{} unexpected IP packet, sending to KNI: {}, dest-ip= {}, ip assigned to core = {}, proto= {}",
+                       thread_id_1,
+                       p.get_header(),
+                       Ipv4Addr::from(ipflow.dst_ip),
+                       Ipv4Addr::from(pipeline_ip),
+                       ipflow.proto,
+                );
                 0
             }
         },
@@ -142,12 +157,13 @@ pub fn setup_generator(
     let tx_clone = tx.clone();
     let (producer, consumer) = new_mpsc_queue_pair();
     //    let creator = PacketInjector::new(producer, &me, no_packets, pipeline_id.clone(), tx_clone.clone());
-    let creator = PacketInjector::new(producer, &me, no_packets);
+    let creator = PacketInjector::new(producer, &me, nr_connections*3);
 
     let mut counter_to = TcpCounter::new();
     let mut counter_from = TcpCounter::new();
 
-    install_task(sched, &tx, &pipeline_id, "PacketInjector", TaskType::TcpGenerator, creator);
+    let injector_uuid=install_task(sched, &tx, &pipeline_id, "PacketInjector", TaskType::TcpGenerator, creator);
+    let injector_ready_flag = sched.get_ready_flag(&injector_uuid).unwrap();
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
@@ -285,9 +301,10 @@ pub fn setup_generator(
 
                 fn synack_received<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState, seqn_inc: u32) {
                     make_reply_packet(h);
+                    c.c_ackn_nxt = h.tcp.ack_num();
                     h.tcp.unset_syn_flag();
-                    c.c_seqn = c.c_seqn.wrapping_add(seqn_inc);
-                    h.tcp.set_seq_num(c.c_seqn);
+                    c.c_seqn_nxt = c.c_seqn_nxt.wrapping_add(seqn_inc);
+                    h.tcp.set_seq_num(c.c_seqn_nxt);
                     update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
                 }
 
@@ -304,7 +321,7 @@ pub fn setup_generator(
                 ) {
                     h.mac.set_etype(0x0800); // overwrite private ethertype tag
                     c.con_rec.server_index = *syn_counter as usize % servers.len();
-                    set_header(&servers[c.con_rec.server_index], c.p_port(), h, me);
+                    set_header(&servers[c.con_rec.server_index], c.port(), h, me);
                     if *syn_counter == 0 {
                         tx.send(MessageFrom::GenTimeStamp(
                             pipeline_id.clone(),
@@ -316,8 +333,8 @@ pub fn setup_generator(
                     }
 
                     //generate seq number:
-                    c.c_seqn = 123456u32.wrapping_add((*syn_counter << 6) as u32);
-                    h.tcp.set_seq_num(c.c_seqn);
+                    c.c_seqn_nxt = 123456u32.wrapping_add((*syn_counter << 6) as u32);
+                    h.tcp.set_seq_num(c.c_seqn_nxt);
                     h.tcp.set_syn_flag();
                     h.tcp.set_window_size(5840); // 4* MSS(1460)
                     h.tcp.set_ack_num(0u32);
@@ -332,7 +349,42 @@ pub fn setup_generator(
                     //debug!("SYN packet to server - L3: {}, L4: {}", h.ip, p.get_header());
                 }
 
-                let mut group_index = 0usize; // the index of the group to be returned
+                #[inline]
+                fn make_payload_packet<M: Sized + Send>(
+                    p: &mut Packet<TcpHeader, M>,
+                    c: &mut Connection,
+                    h: &mut HeaderState,
+                    me: &L234Data,
+                    servers: &Vec<L234Data>,
+                    pipeline_id: &PipelineId,
+                    payload: &Box<Vec<u8>>,
+                ) {
+
+                    h.mac.set_etype(0x0800); // overwrite private ethertype tag
+                    set_header(&servers[c.con_rec.server_index], c.port(), h, me);
+                    let sz= payload.len();
+                    let ip_sz = h.ip.length();
+                    p.add_to_payload_tail(sz).expect("insufficient tail room");
+                    h.ip.set_length(ip_sz+sz as u16);
+                    h.ip.update_checksum();
+                    let tcp_length=h.ip.payload_size(0);
+                    h.tcp.set_seq_num(c.c_seqn_nxt);
+                    h.tcp.unset_syn_flag();
+                    h.tcp.set_window_size(5840); // 4* MSS(1460)
+                    h.tcp.set_ack_num(c.c_ackn_nxt);
+                    h.tcp.set_ack_flag();
+                    h.tcp.set_psh_flag();
+                    c.c_seqn_nxt =c.c_seqn_nxt.wrapping_add(sz as u32);
+                    p.copy_payload_from_bytearray(&payload);
+                    if p.data_len() < MIN_FRAME_SIZE {
+                        let n_padding_bytes = MIN_FRAME_SIZE - p.data_len();
+                        debug!("padding with {} 0x0 bytes", n_padding_bytes);
+                        p.add_padding(n_padding_bytes);
+                    }
+                    update_tcp_checksum(p, tcp_length, h.ip.src(), h.ip.dst());
+                }
+
+                let mut group_index = 0usize; // the index of the group to be returned, default 0: dump packet
 
                 assert!(p.get_pre_header().is_some()); // we must have parsed the headers
                 assert!(p.get_pre_pre_header().is_some()); // we must have parsed the headers
@@ -346,44 +398,64 @@ pub fn setup_generator(
 
                 let hs_flow = hs.ip.flow().unwrap();
                 // if set by the following tcp state machine,
-                // the port/connection becomes released afterwards
+                // the port/connection becomes released/ready afterwards
                 // this is cumbersome, but we must make the  borrow checker happy
                 let mut release_connection = None;
+                let mut ready_connection = None;
                 // check if we got a packet from generator
 
                 match hs.mac.etype() {
                     PRIVATE_ETYPE_PACKET => {
-                        let opt_c = sm.create();
-                        if opt_c.is_some() {
-                            let c = opt_c.unwrap();
-                            generate_syn(
-                                p,
-                                c,
-                                &mut hs,
-                                &me,
-                                &servers,
-                                &tx_clone,
-                                &pipeline_id_clone,
-                                &mut counter_to[TcpControls::SentSyn],
-                            );
-                            c.con_rec.push_c_state(TcpState::SynSent);
-                            wheel.schedule(
-                                &(utils::rdtsc_unsafe() + timeouts.established.unwrap() * MILLIS_TO_CYCLES),
-                                c.p_port(),
-                            );
-                            group_index = 1;
+                        if counter_to[TcpControls::SentSyn] < nr_connections {
+                            let no_ready_connections= sm.ready_connections();
+                            if let Some(c) = sm.create() {
+                                generate_syn(
+                                    p,
+                                    c,
+                                    &mut hs,
+                                    &me,
+                                    &servers,
+                                    &tx_clone,
+                                    &pipeline_id_clone,
+                                    &mut counter_to[TcpControls::SentSyn],
+                                );
+                                c.con_rec.push_c_state(TcpState::SynSent);
+                                wheel.schedule(
+                                    &(utils::rdtsc_unsafe() + timeouts.established.unwrap() * MILLIS_TO_CYCLES),
+                                    c.port(),
+                                );
+                                if counter_to[TcpControls::SentSyn] == nr_connections {
+                                    tx_clone
+                                        .send(MessageFrom::GenTimeStamp(
+                                            pipeline_id_clone.clone(),
+                                            "SYN",
+                                            counter_to[TcpControls::SentSyn],
+                                            utils::rdtsc_unsafe(),
+                                            0,
+                                        )).unwrap();
+                                    // we stop the injector, if nothing to do
+                                    if no_ready_connections == 0 {
+                                        debug!("{}: stopping the injector", thread_id_2);
+                                        injector_ready_flag.store(false, Ordering::SeqCst);
+                                    }
+                                }
+                                group_index = 1;
+                            }
+                        } else {
+                            let reply_socket=SocketAddrV4::new(Ipv4Addr::from(sm.ip()), sm.special_port());
+                            if let Some(c) = sm.get_ready_connection() {
+                                let payload=Box::new(serialize(&reply_socket).expect("cannot serialize SocketAddrV4"));
+                                make_payload_packet(p, c, &mut hs, &me, &servers, &pipeline_id_clone, &payload );
+                                debug!(
+                                    "{}: sending payload packet with payload size {} on port {}",
+                                    thread_id_2,
+                                    payload.len(),
+                                    c.port(),
+                                );
+                                group_index = 1;
+                            }
                         }
 
-                        if counter_to[TcpControls::SentSyn] == no_packets {
-                            tx_clone
-                                .send(MessageFrom::GenTimeStamp(
-                                    pipeline_id_clone.clone(),
-                                    "SYN",
-                                    counter_to[TcpControls::SentSyn],
-                                    utils::rdtsc_unsafe(),
-                                    0,
-                                )).unwrap();
-                        }
                     }
                     PRIVATE_ETYPE_TIMER => {
                         ticks += 1;
@@ -410,7 +482,7 @@ pub fn setup_generator(
                         }
                     }
                     _ => {
-                        if hs.tcp.dst_port() == sm.special_port() {
+                        if hs.tcp.dst_port() == sm.special_port() { //server side
                             let opt_c = if hs.tcp.syn_flag() {
                                 debug!("got SYN on special port 0x{:x}", sm.special_port());
                                 counter_from[TcpControls::RecvSyn] += 1;
@@ -432,14 +504,14 @@ pub fn setup_generator(
                                         counter_from[TcpControls::SentSynAck] += 1;
                                         group_index = 1;
                                     } else {
-                                        warn!("{} received SYN in state {:?}", thread_id_1, c.con_rec.s_states());
+                                        warn!("{} received SYN in state {:?}", thread_id_2, c.con_rec.s_states());
                                     }
                                 } else if hs.tcp.ack_flag() && old_s_state == TcpState::SynReceived {
                                     c.s_con_established();
                                     counter_from[TcpControls::RecvSynAck2] += 1;
                                     debug!(
                                         "{} connection from DUT ({:?}) established",
-                                        thread_id_1,
+                                        thread_id_2,
                                         hs_flow.src_socket_addr()
                                     );
                                 } else if hs.tcp.fin_flag() {
@@ -453,9 +525,9 @@ pub fn setup_generator(
                                         // DUT wants to close connection
                                         debug!(
                                             "{} DUT sends FIN on port {}/{} in state {:?}/{:?}",
-                                            thread_id_1,
+                                            thread_id_2,
                                             hs.tcp.src_port(),
-                                            c.p_port(),
+                                            c.port(),
                                             c.con_rec.last_c_state(),
                                             c.con_rec.last_s_state(),
                                         );
@@ -467,7 +539,7 @@ pub fn setup_generator(
                                         c.s_seqn = c.s_seqn.wrapping_add(1);
                                         hs.tcp.set_seq_num(c.s_seqn);
                                         update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
-                                        debug!("{} FIN-ACK to DUT, L3: { }, L4: { }", thread_id_1, hs.ip, hs.tcp);
+                                        debug!("{} FIN-ACK to DUT, L3: { }, L4: { }", thread_id_2, hs.ip, hs.tcp);
                                         counter_from[TcpControls::SentFinAck] += 1;
                                         group_index = 1;
                                     }
@@ -477,7 +549,7 @@ pub fn setup_generator(
                                     c.con_rec.push_s_state(TcpState::Closed);
                                     c.con_rec.c_released(ReleaseCause::RstServer);
                                     // release connection in the next block
-                                    release_connection = Some(c.p_port());
+                                    release_connection = Some(c.port());
                                 } else if old_s_state == TcpState::LastAck && hs.tcp.ack_flag() {
                                     // received final ack from DUT for DUT initiated close
                                     //debug!("received final ACK for DUT initiated close on port { }", hs.tcp.dst_port());
@@ -485,10 +557,10 @@ pub fn setup_generator(
                                     c.con_rec.push_s_state(TcpState::Closed);
                                     c.con_rec.c_released(ReleaseCause::FinServer);
                                     // release connection in the next block
-                                    release_connection = Some(c.p_port());
+                                    release_connection = Some(c.port());
                                 }
                             }
-                        } else {
+                        } else { // client side
                             // check that flow steering worked:
                             assert!(sm.owns_tcp_port(hs.tcp.dst_port()));
                             let mut c = sm.get_mut_by_port(hs.tcp.dst_port());
@@ -502,6 +574,7 @@ pub fn setup_generator(
                                     counter_to[TcpControls::RecvSynAck] += 1;
                                     if old_c_state == TcpState::SynSent {
                                         c.c_con_established();
+                                        ready_connection=Some(c.port());
                                         //tx_clone
                                         //    .send(MessageFrom::Established(pipeline_id_clone.clone(), c.con_rec.clone()))
                                         //    .unwrap();
@@ -515,7 +588,7 @@ pub fn setup_generator(
                                         synack_received(p, &mut c, &mut hs, 0u32);
                                         counter_to[TcpControls::SentAck] += 1;
                                     } else {
-                                        warn!("{} received SYN-ACK in wrong state: {:?}",thread_id_1, old_c_state);
+                                        warn!("{} received SYN-ACK in wrong state: {:?}",thread_id_2, old_c_state);
                                         group_index = 0;
                                     } // ignore the SynAck
                                 } else if hs.tcp.fin_flag() {
@@ -540,7 +613,7 @@ pub fn setup_generator(
                                         make_reply_packet(&mut hs);
                                         hs.tcp.set_ack_flag();
                                         //c.c_seqn = c.c_seqn.wrapping_add(1);
-                                        hs.tcp.set_seq_num(c.c_seqn);
+                                        hs.tcp.set_seq_num(c.c_seqn_nxt);
                                         counter_to[TcpControls::SentFinAck] += 1;
                                         update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
                                         group_index = 1;
@@ -551,7 +624,7 @@ pub fn setup_generator(
                                     c.con_rec.push_c_state(TcpState::Closed);
                                     c.con_rec.c_released(ReleaseCause::RstServer);
                                     // release connection in the next block
-                                    release_connection = Some(c.p_port());
+                                    release_connection = Some(c.port());
                                 } else if old_c_state == TcpState::LastAck && hs.tcp.ack_flag() {
                                     // received final ack from server for server initiated close
                                     //debug!("received final ACK for server initiated close on port { }", hs.tcp.dst_port());
@@ -560,7 +633,7 @@ pub fn setup_generator(
                                     c.con_rec.push_c_state(TcpState::Closed);
                                     c.con_rec.c_released(ReleaseCause::FinServer);
                                     // release connection in the next block
-                                    release_connection = Some(c.p_port());
+                                    release_connection = Some(c.port());
                                 } else {
                                     counter_to[TcpControls::Unexpected] += 1;
                                     // debug!("received from server { } in c/s state {:?}/{:?} ", hs.tcp, c.con_rec.c_state, c.con_rec.s_state);
@@ -569,16 +642,17 @@ pub fn setup_generator(
 
                                 if b_unexpected {
                                     warn!(
-                                        "{} unexpected server side TCP packet on port {} in client state {:?}, sending to KNI i/f",
-                                        thread_id_1,
+                                        "{} unexpected server side TCP packet on port {} in client state {:?}, sending to KNI i/f: {}",
+                                        thread_id_2,
                                         hs.tcp.dst_port(),
                                         c.con_rec.c_states(),
+                                        hs.tcp,
                                     );
                                     group_index = 2;
                                 }
                             } else {
                                 warn!("{} engine has no state for {}:{}, sending to KNI i/f",
-                                      thread_id_1,
+                                      thread_id_2,
                                       hs.ip,
                                       hs.tcp,
                                       //Ipv4Addr::from(hs.ip.dst()),
@@ -596,6 +670,15 @@ pub fn setup_generator(
                 if let Some(sport) = release_connection {
                     //debug!("releasing port {}", sport);
                     sm.release_port(sport);
+                }
+                if let Some(sport) = ready_connection {
+                    debug!("{} connection on  port {} is ready", thread_id_2, sport);
+                    sm.set_ready_connection(sport);
+                    // if this is the first ready connection, we restart the injector, avoid accessing Atomic too often
+                    if sm.ready_connections()==1 {
+                        debug!("{} (re-)starting the injector", thread_id_2);
+                        injector_ready_flag.store(true, Ordering::SeqCst);
+                    }
                 }
                 do_ttl(&mut hs);
                 group_index

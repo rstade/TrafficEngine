@@ -16,7 +16,7 @@ use e2d2::utils;
 
 use eui48::MacAddress;
 use separator::Separatable;
-use timer_wheel::{TimerWheel, MILLIS_TO_CYCLES};
+use timer_wheel::{TimerWheel};
 use {EngineConfig, MessageFrom, PipelineId, Timeouts};
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -260,7 +260,9 @@ impl fmt::Display for ConRecord {
 #[derive(Clone)]
 pub struct Connection {
     pub con_rec: ConRecord,
-    pub c_seqn: u32,        // client side sequence no towards DUT
+    pub c_seqn_nxt: u32,    // next client side sequence no towards DUT
+    pub c_seqn_una: u32,    // oldest unacknowledged sequence no
+    pub c_ackn_nxt: u32,    // next client side ack no towards DUT (expected seqn)
     pub s_seqn: u32,        // server side sequence no towards DUT
     pub dut_mac: MacHeader, // server side mac, i.e. mac of DUT
 }
@@ -268,7 +270,9 @@ pub struct Connection {
 impl Connection {
     #[inline]
     fn initialize(&mut self, sock: Option<SocketAddrV4>, port: u16) {
-        self.c_seqn = 0;
+        self.c_seqn_nxt = 0;
+        self.c_seqn_una = 0;
+        self.c_ackn_nxt = 0;
         self.s_seqn = 0;
         self.dut_mac = MacHeader::default();
         self.con_rec.init(port, sock);
@@ -276,7 +280,9 @@ impl Connection {
 
     fn new() -> Connection {
         Connection {
-            c_seqn: 0,
+            c_seqn_nxt: 0, //next seqn towards DUT
+            c_seqn_una: 0, // acked by DUT
+            c_ackn_nxt: 0, //next ackn towards DUT
             s_seqn: 0,
             dut_mac: MacHeader::default(),
             con_rec: ConRecord::new(),
@@ -300,7 +306,7 @@ impl Connection {
     }
 
     #[inline]
-    pub fn p_port(&self) -> u16 {
+    pub fn port(&self) -> u16 {
         self.con_rec.port
     }
 
@@ -310,7 +316,7 @@ impl Connection {
     }
 
     #[inline]
-    pub fn set_p_port(&mut self, port: u16) {
+    pub fn set_port(&mut self, port: u16) {
         self.con_rec.port = port;
     }
 
@@ -330,7 +336,7 @@ impl fmt::Display for Connection {
         write!(
             f,
             "Connection(s-port={}, {:?})",
-            self.p_port(),
+            self.port(),
             self.con_rec.c_states(),
             //self.con_rec.s_states(),
         )
@@ -343,6 +349,7 @@ pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 pub struct ConnectionManager {
     con_records: Vec<ConRecord>,
     free_ports: VecDeque<u16>,
+    ready: VecDeque<u16>,  // ports of connections with data to send and in state Established when enqueued
     port2con: Vec<Connection>,
     sock2port: HashMap<SocketAddrV4, u16>,
     timeouts: Timeouts,
@@ -353,6 +360,8 @@ pub struct ConnectionManager {
     special_port: u16, // e.g. used as a listen port, not assigned by create
     ip: u32,    // ip address to use for connections of this manager
 }
+
+const MAX_CONNECTIONS:usize = 0xFFFF as usize;
 
 impl ConnectionManager {
     pub fn new(
@@ -367,10 +376,11 @@ impl ConnectionManager {
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let max_tcp_port: u16 = tcp_port_base + !port_mask;
         let cm = ConnectionManager {
-            con_records: Vec::with_capacity(100000),
+            con_records: Vec::with_capacity(MAX_CONNECTIONS),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
             sock2port: HashMap::with_capacity((!port_mask + 1) as usize),
             free_ports: (tcp_port_base..max_tcp_port).collect(),
+            ready: VecDeque::with_capacity(MAX_CONNECTIONS),
             timeouts: Timeouts::default_or_some(&engine_config.timeouts),
             pci,
             pipeline_id,
@@ -407,6 +417,11 @@ impl ConnectionManager {
     }
 
     #[inline]
+    pub fn ip(&self) -> u32 {
+        self.ip
+    }
+
+    #[inline]
     pub fn special_port(&self) -> u16 {
         self.special_port
     }
@@ -417,7 +432,7 @@ impl ConnectionManager {
             // check if c has a port != 0 assigned
             // otherwise it is released, as we keep released connections
             // and just mark them as unused by assigning port 0
-            if c.p_port() != 0 {
+            if c.port() != 0 {
                 Some(c)
             } else {
                 None
@@ -451,7 +466,7 @@ impl ConnectionManager {
             //let now;
             {
                 let cc = &mut self.port2con[(port - self.tcp_port_base) as usize];
-                assert_eq!(cc.p_port(), 0);
+                assert_eq!(cc.port(), 0);
                 cc.initialize(Some(sock), port);
                 //now = cc.con_rec.c_syn_recv;
                 debug!("tcp flow for {} created on port {:?}", sock, port);
@@ -507,7 +522,7 @@ impl ConnectionManager {
             let port = opt_port.unwrap();
             {
                 let cc = self.get_mut_con(&port);
-                assert_eq!(cc.p_port(), 0);
+                assert_eq!(cc.port(), 0);
                 cc.initialize(None, port);
                 //debug!("tcp flow created on port {:?}", port);
             }
@@ -524,8 +539,8 @@ impl ConnectionManager {
         if c.in_use() {
             self.con_records.push(c.con_rec.clone());
             self.free_ports.push_back(port);
-            assert_eq!(port, c.p_port());
-            c.set_p_port(0u16); // this indicates an unused connection,
+            assert_eq!(port, c.port());
+            c.set_port(0u16); // this indicates an unused connection,
                                 // we keep unused connection in port2con table
         }
     }
@@ -534,7 +549,7 @@ impl ConnectionManager {
     pub fn record_uncompleted(&mut self) {
         let c_records = &mut self.con_records;
         self.port2con.iter().for_each(|c| {
-            if c.p_port() != 0 {
+            if c.port() != 0 {
                 c_records.push(c.con_rec.clone());
             }
         });
@@ -547,17 +562,46 @@ impl ConnectionManager {
         info!(
             "{}: {:6} open connections",
             self.pipeline_id,
-            self.port2con.iter().filter(|c| c.p_port() != 0).collect::<Vec<_>>().len()
+            self.port2con.iter().filter(|c| c.port() != 0).collect::<Vec<_>>().len()
         );
         self.port2con.iter().enumerate().for_each(|(i, c)| {
-            if c.p_port() != 0 {
+            if c.port() != 0 {
                 info!("{:6}: {}", i, c.con_rec)
             }
         });
     }
 
     pub fn fetch_c_records(&mut self) -> Vec<ConRecord> {
-        mem::replace(&mut self.con_records, Vec::with_capacity(100000)) // we are "moving" the con_records out, and replace it with a new one
+        mem::replace(&mut self.con_records, Vec::with_capacity(MAX_CONNECTIONS)) // we are "moving" the con_records out, and replace it with a new one
+    }
+
+    #[inline]
+    pub fn set_ready_connection(&mut self, port: u16)  {
+        self.ready.push_back(port);
+    }
+
+    #[inline]
+    pub fn ready_connections(&self) -> usize { self.ready.len() }
+
+    pub fn get_ready_connection(&mut self) -> Option<&mut Connection> {
+        let mut port_result=None;
+        while port_result.is_none() {
+            match self.ready.pop_front() {
+                Some(port) => {
+                    let c=&self.port2con[(port - self.tcp_port_base) as usize];
+                    if c.port() !=0 && *c.con_rec.last_c_state()==TcpState::Established {
+                        port_result=Some(port)
+                    }
+                },
+                None => break, // ready queue is empty
+            };
+        }
+        // borrow checker forces us this two-step way, cannot mutably borrow connection directly
+        if let Some(port)=port_result {
+            Some(&mut self.port2con[(port - self.tcp_port_base) as usize])
+        } else {
+            None
+        }
     }
 
     #[allow(dead_code)]

@@ -13,7 +13,7 @@ path = "src/bin.rs"
 
 
 [dependencies]
-e2d2 = { version = "=0.3.2", path = "../../work/NetBricks/framework", features = ["performance"] }
+e2d2 = { version = "=0.3.3", path = "../../work/NetBricks/framework", features = ["performance"] }
 rand = "0.3"
 fnv = "*"
 log = "0.4"
@@ -28,6 +28,7 @@ serde_derive = "1.0"
 eui48 = { version= "0.3", features=["serde"] }
 error-chain = ">=0.12"
 uuid = { version = ">=0.7", features = ["v4"] }
+bincode = "*"
 
 [features]
 

@@ -10,6 +10,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, Shutdown, Ipv4Addr};
 use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::collections::{HashSet, HashMap};
+use std::io::Read;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
@@ -180,7 +181,10 @@ pub fn run_test(test_type: TestType) {
                             debug!("bound server {} to {}:{}", id, target_ip, target_port);
                             for stream in listener1.incoming() {
                                 let mut stream = stream.unwrap();
+                                let mut buffer = [0u8; 256];
                                 debug!("{} received connection from: {}", id, stream.peer_addr().unwrap());
+                                let nr_bytes= stream.read(&mut buffer[..]).expect(&format!("cannot read from stream {}", stream.peer_addr().unwrap()));
+                                debug!("{} received {} bytes from: {}", id, nr_bytes, stream.peer_addr().unwrap())
                             }
                         }
                         _ => {

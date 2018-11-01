@@ -16,6 +16,8 @@ extern crate eui48;
 extern crate ipnet;
 extern crate uuid;
 extern crate serde;
+extern crate bincode;
+
 #[macro_use]
 extern crate error_chain;
 
@@ -341,7 +343,7 @@ pub fn setup_pipelines(
                     kni_port: kni.unwrap().port.clone(),
                     last_tick: 0,
                 },
-            ).ready(), // this task must be ready from the beginning to enable managing the KNI i/f
+            ).move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
         );
     }
 
