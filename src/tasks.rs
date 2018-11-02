@@ -106,7 +106,8 @@ impl PacketInjector {
 impl Executable for PacketInjector {
     fn execute(&mut self) -> u32 {
         let mut inserted = 0;
-        if self.no_packets == 0 || self.sent_packets < self.no_packets {
+        // only enqeue new packets if queue has free slots for a full batch (currently we would otherwise create a memory leak)
+        if (self.no_packets == 0 || self.sent_packets < self.no_packets) && self.producer.free_slots() >= INJECTOR_BATCH_SIZE {
             let mut mbuf_ptr_array = Vec::<*mut MBuf>::with_capacity(INJECTOR_BATCH_SIZE);
             let ret = unsafe { mbuf_alloc_bulk(mbuf_ptr_array.as_mut_ptr(), INJECTOR_BATCH_SIZE as u32) };
             assert_eq!(ret, 0);
@@ -116,20 +117,8 @@ impl Executable for PacketInjector {
             }
             inserted = self.producer.enqueue_mbufs(&mbuf_ptr_array);
             self.sent_packets += inserted;
-            //if inserted < INJECTOR_BATCH_SIZE {
-            //    debug!("PacketInjector buffer full, inserted= {}", inserted);
-            //}
-            /*
-            if self.sent_batches == self.no_batches {
-                self.used_cycles[0] += utils::rdtsc_unsafe() - begin;
-                self.tx.send(MessageFrom::GenTimeStamp(
-                    self.pipeline_id.clone(),
-                    self.sent_batches as u64,
-                    self.used_cycles[0],
-                    self.used_cycles[1],
-                )).unwrap();
-            } else { self.used_cycles[0] += utils::rdtsc_unsafe() - begin };
-            */        }
+            assert_eq!(inserted, INJECTOR_BATCH_SIZE);
+        }
         inserted as u32
     }
 }

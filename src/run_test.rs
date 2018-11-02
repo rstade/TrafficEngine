@@ -193,7 +193,7 @@ pub fn run_test(test_type: TestType) {
                     });
                 }
 
-                thread::sleep(Duration::from_millis(2000 as u64)); // wait for the servers
+                thread::sleep(Duration::from_millis(1000 as u64)); // wait for the servers
             }
             // start generator
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
@@ -246,7 +246,7 @@ pub fn run_test(test_type: TestType) {
                 }
             }
 
-            thread::sleep(Duration::from_millis(5000 as u64));
+            thread::sleep(Duration::from_millis(1000 as u64));
             mtx.send(MessageFrom::PrintPerformance(vec![1, 2])).unwrap();
             thread::sleep(Duration::from_millis(100 as u64));
             //main loop

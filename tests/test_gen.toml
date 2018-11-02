@@ -14,7 +14,7 @@ vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk
 
 [trafficengine]
 
-engine      = { flow_steering= "Port", namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24", port=999, timeouts= { established= 5000 } }
+engine      = { flow_steering= "Port", namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24", port=999, timeouts= { established= 10000 } }
 targets     = [ { id = "server 1", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12345 },
                 { id = "server 2", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12346 },
                 { id = "server 3", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12347 },
