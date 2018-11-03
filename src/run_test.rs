@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::env;
 use std::time::Duration;
 use std::thread;
-use std::net::{SocketAddr, TcpListener, TcpStream, Shutdown, Ipv4Addr};
+use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, Shutdown, Ipv4Addr};
 use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::collections::{HashSet, HashMap};
-use std::io::Read;
+use std::io::{Read, Write};
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
@@ -21,6 +21,7 @@ use e2d2::allocators::CacheAligned;
 
 use ipnet::Ipv4Net;
 use env_logger;
+use bincode;
 
 use read_config;
 use {get_mac_from_ifname, initialize_flowdirector, FlowSteeringMode};
@@ -183,8 +184,9 @@ pub fn run_test(test_type: TestType) {
                                 let mut stream = stream.unwrap();
                                 let mut buffer = [0u8; 256];
                                 debug!("{} received connection from: {}", id, stream.peer_addr().unwrap());
-                                let nr_bytes= stream.read(&mut buffer[..]).expect(&format!("cannot read from stream {}", stream.peer_addr().unwrap()));
-                                debug!("{} received {} bytes from: {}", id, nr_bytes, stream.peer_addr().unwrap())
+                                let _nr_bytes= stream.read(&mut buffer[..]).expect(&format!("cannot read from stream {}", stream.peer_addr().unwrap()));
+                                let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&buffer).expect("cannot deserialize SocketAddrV4"));
+                                debug!("{} received {:?} from: {}", id, socket, stream.peer_addr().unwrap())
                             }
                         }
                         _ => {
@@ -220,11 +222,10 @@ pub fn run_test(test_type: TestType) {
                             debug!("test connection {}: TCP connect to engine successful", ntry);
                             stream.set_write_timeout(Some(timeout)).unwrap();
                             stream.set_read_timeout(Some(timeout)).unwrap();
-                            stream.shutdown(Shutdown::Both).unwrap();
-                            /*match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
+                            match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
                                 Ok(_) => {
                                     debug!("successfully send {} stars", ntry);
-                                    let mut buf = [0u8; 256];
+                                    /* let mut buf = [0u8; 256];
                                     match stream.read(&mut buf[..]) {
                                         Ok(_) => {
                                             info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap())
@@ -233,11 +234,13 @@ pub fn run_test(test_type: TestType) {
                                             panic!("timeout on connection {} while waiting for answer", ntry);
                                         }
                                     };
+                                    */
                                 }
                                 _ => {
                                     panic!("error when writing to test connection {}", ntry);
                                 }
-                            }*/
+                            }
+                            stream.shutdown(Shutdown::Both).unwrap();
                         }
                         _ => {
                             panic!("test connection {}: 3-way handshake with proxy failed", ntry);
@@ -290,7 +293,7 @@ pub fn run_test(test_type: TestType) {
                     debug!("Pipeline {}:", p);
                     c_records.iter().enumerate().for_each(|(i, c)| {
                         debug!("{:6}: {}", i, c);
-                        if c.get_release_cause() == ReleaseCause::FinServer && c.s_states().last().unwrap() == &TcpState::Closed {
+                        if c.get_release_cause().1 == ReleaseCause::FinServer && c.s_states().last().unwrap() == &TcpState::Closed {
                             completed_count += 1
                         };
                     });
@@ -319,7 +322,7 @@ pub fn run_test(test_type: TestType) {
                     debug!("Pipeline {}:", p);
                     c_records.iter().enumerate().for_each(|(i, c)| {
                         debug!("{:6}: {}", i, c);
-                        if c.get_release_cause() == ReleaseCause::FinServer && c.c_states().last().unwrap() == &TcpState::Closed {
+                        if c.get_release_cause().0 == ReleaseCause::FinServer && c.c_states().last().unwrap() == &TcpState::Closed {
                             completed_count += 1
                         };
                     });

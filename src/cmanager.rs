@@ -27,6 +27,7 @@ pub enum TcpState {
     Established,
     CloseWait,
     FinWait1,
+    Closing,
     FinWait2,
     LastAck,
     Closed,
@@ -145,7 +146,8 @@ pub enum ReleaseCause {
     FinClient = 2, // i.e. engine
     FinServer = 3, // i.e. DUT
     RstServer = 4,
-    MaxCauses = 5,
+    RstClient = 5,
+    MaxCauses = 6,
 }
 
 #[derive(Clone)]
@@ -158,7 +160,8 @@ pub struct ConRecord {
     s_state: [TcpState; 8],
     stamps: [u64; 8],
     pub server_index: usize,
-    release_cause: ReleaseCause,
+    c_release_cause: ReleaseCause,
+    s_release_cause: ReleaseCause,
 }
 
 impl ConRecord {
@@ -172,19 +175,27 @@ impl ConRecord {
         self.server_index = 0;
         self.sock = sock;
     }
+
     #[inline]
     pub fn c_released(&mut self, cause: ReleaseCause) {
-        self.release_cause = cause;
+        self.c_release_cause = cause;
     }
+
     #[inline]
-    pub fn get_release_cause(&self) -> ReleaseCause {
-        self.release_cause
+    pub fn s_released(&mut self, cause: ReleaseCause) {
+        self.s_release_cause = cause;
+    }
+
+    #[inline]
+    pub fn get_release_cause(&self) -> (ReleaseCause,ReleaseCause) {
+        (self.c_release_cause, self.s_release_cause)
     }
 
     fn new() -> ConRecord {
         ConRecord {
             server_index: 0,
-            release_cause: ReleaseCause::Unknown,
+            c_release_cause: ReleaseCause::Unknown,
+            s_release_cause: ReleaseCause::Unknown,
             // we are using an Array, not Vec for the state history, the latter eats too much performance
             c_count: 0,
             c_state: [TcpState::Closed; 8],
@@ -243,11 +254,12 @@ impl fmt::Display for ConRecord {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Connection(port={}, {:?}/{:?}, {:?}, {}, {:?})",
+            "Connection(port={}, {:?}/{:?}, {:?}/{:?}, {}, {:?})",
             self.port,
             self.c_states(),
             self.s_states(),
-            self.release_cause,
+            self.c_release_cause,
+            self.s_release_cause,
             self.stamps[1].separated_string(),
             self.elapsed_since_synsent()
                 .iter()
@@ -263,7 +275,8 @@ pub struct Connection {
     pub c_seqn_nxt: u32,    // next client side sequence no towards DUT
     pub c_seqn_una: u32,    // oldest unacknowledged sequence no
     pub c_ackn_nxt: u32,    // next client side ack no towards DUT (expected seqn)
-    pub s_seqn: u32,        // server side sequence no towards DUT
+    pub s_seqn_nxt: u32,        // server side sequence no towards DUT
+    pub s_ackn_nxt: u32,
     pub dut_mac: MacHeader, // server side mac, i.e. mac of DUT
 }
 
@@ -273,7 +286,8 @@ impl Connection {
         self.c_seqn_nxt = 0;
         self.c_seqn_una = 0;
         self.c_ackn_nxt = 0;
-        self.s_seqn = 0;
+        self.s_seqn_nxt = 0;
+        self.s_ackn_nxt = 0;
         self.dut_mac = MacHeader::default();
         self.con_rec.init(port, sock);
     }
@@ -283,7 +297,8 @@ impl Connection {
             c_seqn_nxt: 0, //next seqn towards DUT
             c_seqn_una: 0, // acked by DUT
             c_ackn_nxt: 0, //next ackn towards DUT
-            s_seqn: 0,
+            s_ackn_nxt: 0,
+            s_seqn_nxt: 0,
             dut_mac: MacHeader::default(),
             con_rec: ConRecord::new(),
         }
