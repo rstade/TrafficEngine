@@ -200,7 +200,7 @@ pub fn main() {
                 debug!("Pipeline {}:", p);
                 c_records.iter().enumerate().for_each(|(i, c)| {
                     debug!("{:6}: {}", i, c);
-                    if c.get_release_cause().0 == ReleaseCause::FinServer && c.c_states().last().unwrap() == &TcpState::Closed {
+                if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
                         completed_count += 1
                     };
                 });

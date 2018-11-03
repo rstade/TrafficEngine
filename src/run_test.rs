@@ -163,6 +163,7 @@ pub fn run_test(test_type: TestType) {
             let port_mask = u16::from_be(netbricks_configuration.ports[0].fdir_conf.unwrap().mask.dst_port_mask);
             let rx_queues = context.rx_queues.len() as u16;
             let rfs_mode = configuration.flow_steering_mode();
+            let cores = context.active_cores.clone();
             debug!("rx_queues = { }, port mask = 0x{:x}", rx_queues, port_mask);
 
             // start the controller
@@ -250,7 +251,7 @@ pub fn run_test(test_type: TestType) {
             }
 
             thread::sleep(Duration::from_millis(1000 as u64));
-            mtx.send(MessageFrom::PrintPerformance(vec![1, 2])).unwrap();
+            mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
             thread::sleep(Duration::from_millis(100 as u64));
             //main loop
             /* println!("press ctrl-c to terminate proxy ...");
@@ -293,7 +294,7 @@ pub fn run_test(test_type: TestType) {
                     debug!("Pipeline {}:", p);
                     c_records.iter().enumerate().for_each(|(i, c)| {
                         debug!("{:6}: {}", i, c);
-                        if c.get_release_cause().1 == ReleaseCause::FinServer && c.s_states().last().unwrap() == &TcpState::Closed {
+                        if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
                             completed_count += 1
                         };
                     });
@@ -322,7 +323,7 @@ pub fn run_test(test_type: TestType) {
                     debug!("Pipeline {}:", p);
                     c_records.iter().enumerate().for_each(|(i, c)| {
                         debug!("{:6}: {}", i, c);
-                        if c.get_release_cause().0 == ReleaseCause::FinServer && c.c_states().last().unwrap() == &TcpState::Closed {
+                        if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
                             completed_count += 1
                         };
                     });
