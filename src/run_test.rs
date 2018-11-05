@@ -21,12 +21,12 @@ use e2d2::allocators::CacheAligned;
 
 use ipnet::Ipv4Net;
 use env_logger;
-use bincode;
+use serde_json;
 
 use read_config;
 use {get_mac_from_ifname, initialize_flowdirector, FlowSteeringMode};
 use setup_pipelines;
-use L234Data;
+use {CData, L234Data};
 use {MessageFrom, MessageTo};
 use spawn_recv_thread;
 use errors::*;
@@ -129,6 +129,7 @@ pub fn run_test(test_type: TestType) {
         Ok(context)
     }
 
+
     match initialize_system(&mut netbricks_configuration)
         .map_err(|e| e.into())
         .and_then(|ctxt| check_system(ctxt))
@@ -185,9 +186,10 @@ pub fn run_test(test_type: TestType) {
                                 let mut stream = stream.unwrap();
                                 let mut buffer = [0u8; 256];
                                 debug!("{} received connection from: {}", id, stream.peer_addr().unwrap());
-                                let _nr_bytes= stream.read(&mut buffer[..]).expect(&format!("cannot read from stream {}", stream.peer_addr().unwrap()));
-                                let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&buffer).expect("cannot deserialize SocketAddrV4"));
-                                debug!("{} received {:?} from: {}", id, socket, stream.peer_addr().unwrap())
+                                let nr_bytes= stream.read(&mut buffer[..]).expect(&format!("cannot read from stream {}", stream.peer_addr().unwrap()));
+                                let cdata:CData = serde_json::from_slice(&buffer[0..nr_bytes]).expect("cannot deserialize CData");
+                                //let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&buffer).expect("cannot deserialize SocketAddrV4"));
+                                debug!("{} received {:?} from: {}", id, cdata, stream.peer_addr().unwrap())
                             }
                         }
                         _ => {
@@ -223,6 +225,13 @@ pub fn run_test(test_type: TestType) {
                             debug!("test connection {}: TCP connect to engine successful", ntry);
                             stream.set_write_timeout(Some(timeout)).unwrap();
                             stream.set_read_timeout(Some(timeout)).unwrap();
+                            let cdata= CData {
+                                reply_socket: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080),
+                                client_port: 0xFFFF,
+                            };
+                            let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
+                            stream.write(json_string.as_bytes()).expect("cannot write to stream");
+
                             match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
                                 Ok(_) => {
                                     debug!("successfully send {} stars", ntry);
@@ -274,8 +283,8 @@ pub fn run_test(test_type: TestType) {
                         tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                         tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }
-                    Ok(MessageTo::CRecords(pipeline_id, c_records)) => {
-                        con_records.insert(pipeline_id, c_records);
+                    Ok(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server)) => {
+                        con_records.insert(pipeline_id, (c_records_client, c_records_server));
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                     Err(RecvTimeoutError::Timeout) => {
@@ -289,7 +298,7 @@ pub fn run_test(test_type: TestType) {
             }
 
             if test_type == TestType::Server {
-                for (p, c_records) in &con_records {
+                for (p, (_, c_records)) in &con_records {
                     let mut completed_count = 0;
                     debug!("Pipeline {}:", p);
                     c_records.iter().enumerate().for_each(|(i, c)| {
@@ -318,7 +327,7 @@ pub fn run_test(test_type: TestType) {
                 }
             }
             if test_type == TestType::Client {
-                for (p, c_records) in &con_records {
+                for (p, (c_records, _)) in &con_records {
                     let mut completed_count = 0;
                     debug!("Pipeline {}:", p);
                     c_records.iter().enumerate().for_each(|(i, c)| {

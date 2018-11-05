@@ -148,6 +148,8 @@ pub fn main() {
                 },
             ));
 
+            let cores = context.active_cores.clone();
+
             // start the controller
             spawn_recv_thread(mrx, context, configuration);
 
@@ -164,7 +166,7 @@ pub fn main() {
                 thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
             }
 
-            mtx.send(MessageFrom::PrintPerformance(vec![1, 2])).unwrap();
+            mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
             thread::sleep(Duration::from_millis(100 as u64));
             mtx.send(MessageFrom::FetchCounter).unwrap();
             mtx.send(MessageFrom::FetchCRecords).unwrap();
@@ -181,8 +183,8 @@ pub fn main() {
                         tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                         tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }
-                    Ok(MessageTo::CRecords(pipeline_id, c_records)) => {
-                        con_records.insert(pipeline_id, c_records);
+                    Ok(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server)) => {
+                        con_records.insert(pipeline_id, (c_records_client, c_records_server));
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                     Err(RecvTimeoutError::Timeout) => {
@@ -195,16 +197,26 @@ pub fn main() {
                 }
             }
 
-            for (p, c_records) in con_records {
-                let mut completed_count = 0;
+            for (p, (c_records_client, c_records_server)) in con_records {
+                let mut completed_count_c = 0;
                 debug!("Pipeline {}:", p);
-                c_records.iter().enumerate().for_each(|(i, c)| {
+                c_records_client.iter().enumerate().for_each(|(i, c)| {
                     debug!("{:6}: {}", i, c);
                 if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
-                        completed_count += 1
+                        completed_count_c += 1
                     };
                 });
-                debug!("{} completed connections", completed_count);
+
+
+                let mut completed_count_s=0;
+                c_records_server.iter().enumerate().for_each(|(i, c)| {
+                    debug!("{:6}: {}", i, c);
+                    if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
+                        completed_count_s += 1
+                    };
+                });
+                info!("{} completed client connections", completed_count_c);
+                info!("{} completed server connections", completed_count_s);
             }
 
             mtx.send(MessageFrom::Exit).unwrap();

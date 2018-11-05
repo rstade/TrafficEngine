@@ -60,28 +60,30 @@ where
 
     #[inline]
     pub fn tick(&mut self, now: &u64) -> (Option<Drain<T>>, bool) {
-        let dur = *now - self.start;
-        let advance = dur / self.resolution_cycles;
-        //println!("dur= {:?}, advance= {}", dur, advance);
-        let progress = (advance - self.last_advance) as usize;
-        let mut slots_to_process = min(progress, self.no_slots);
-        if progress > self.no_slots {
-            self.last_slot = (advance - slots_to_process as u64).wrapping_rem(self.no_slots as u64) as usize;
-            self.last_advance = advance - slots_to_process as u64;
-        }
-        while slots_to_process > 0 {
-            self.last_slot = (self.last_slot + 1).wrapping_rem(self.no_slots);
-            self.last_advance += 1;
-            if self.slots[self.last_slot].len() > 0 {
-                debug!(
-                    "slots_to_process= {}, processing slot {} with {} events",
-                    slots_to_process,
-                    self.last_slot,
-                    self.slots[self.last_slot].len()
-                );
-                return (Some(self.slots[self.last_slot].drain(..)), slots_to_process > 1);
-            } else {
-                slots_to_process -= 1
+        if self.start != 0 { // only when the wheel has been started
+            let dur = *now - self.start;
+            let advance = dur / self.resolution_cycles;
+            //trace!("dur= {:?}, advance= {}, last_advance= {}", dur, advance, self.last_advance);
+            let progress = (advance - self.last_advance) as usize;
+            let mut slots_to_process = min(progress, self.no_slots);
+            if progress > self.no_slots {
+                self.last_slot = (advance - slots_to_process as u64).wrapping_rem(self.no_slots as u64) as usize;
+                self.last_advance = advance - slots_to_process as u64;
+            }
+            while slots_to_process > 0 {
+                self.last_slot = (self.last_slot + 1).wrapping_rem(self.no_slots);
+                self.last_advance += 1;
+                if self.slots[self.last_slot].len() > 0 {
+                    debug!(
+                        "slots_to_process= {}, processing slot {} with {} events",
+                        slots_to_process,
+                        self.last_slot,
+                        self.slots[self.last_slot].len()
+                    );
+                    return (Some(self.slots[self.last_slot].drain(..)), slots_to_process > 1);
+                } else {
+                    slots_to_process -= 1
+                }
             }
         }
         (None, false)

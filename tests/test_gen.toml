@@ -23,4 +23,4 @@ targets     = [ { id = "server 1", ip = "192.168.222.32", linux_if="enp7s0f1" , 
                 { id = "server 6", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12350 },
                 { id = "server 7", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12351 },
               ]
-test_size   = 32
+test_size   = 1024
