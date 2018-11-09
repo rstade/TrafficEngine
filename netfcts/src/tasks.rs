@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use e2d2::scheduler::Executable;
 use e2d2::interface::PmdPort;
 use e2d2::native::zcsi::rte_kni_handle_request;
 use e2d2::common::EmptyMetadata;
@@ -7,9 +6,31 @@ use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::{Packet, new_packet};
 use e2d2::queues::{MpscProducer};
 use e2d2::native::zcsi::{mbuf_alloc_bulk, MBuf};
+use e2d2::scheduler::{Executable, Runnable, Scheduler, StandaloneScheduler};
 
-use cmanager::L234Data;
+use tcp_common::L234Data;
 use e2d2::utils;
+use uuid::Uuid;
+
+#[derive(Debug)]
+pub enum TaskType {
+    TcpGenerator = 0,
+    Pipe2Kni = 1,
+    Pipe2Pci = 2,
+    TickGenerator = 3,
+    NoTaskTypes = 4, // for iteration over TaskType
+}
+
+pub fn install_task<T: Executable + 'static>(
+    sched: &mut StandaloneScheduler,
+    task_name: &str,
+    task: T,
+) -> Uuid {
+    let uuid = Uuid::new_v4();
+    sched.add_runnable(Runnable::from_task(uuid, task_name.to_string(), task).move_unready());
+    uuid
+}
+
 
 pub struct KniHandleRequest {
     pub kni_port: Arc<PmdPort>,

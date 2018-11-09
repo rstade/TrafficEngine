@@ -3,6 +3,9 @@ extern crate e2d2;
 extern crate env_logger;
 extern crate eui48;
 extern crate ipnet;
+extern crate separator;
+extern crate netfcts;
+
 // Logging
 #[macro_use]
 extern crate log;
@@ -14,10 +17,12 @@ use e2d2::native::zcsi::*;
 use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 
-use traffic_lib::{get_mac_from_ifname, read_config, setup_pipelines, initialize_flowdirector};
+use netfcts::initialize_flowdirector;
+use netfcts::comm::{MessageFrom, MessageTo};
+
+use traffic_lib::{get_mac_from_ifname, read_config, setup_pipelines};
 use traffic_lib::errors::*;
 use traffic_lib::L234Data;
-use traffic_lib::{MessageFrom, MessageTo};
 use traffic_lib::spawn_recv_thread;
 use traffic_lib::ReleaseCause;
 use traffic_lib::{TcpState};
@@ -30,6 +35,10 @@ use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
+use std::str::FromStr;
+
+use separator::Separatable;
+use ipnet::Ipv4Net;
 
 pub fn main() {
     env_logger::init();
@@ -124,7 +133,7 @@ pub fn main() {
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
-            let flowdirector_map=initialize_flowdirector(&context, &configuration);
+            let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom>();
@@ -197,19 +206,37 @@ pub fn main() {
                 }
             }
 
-            for (p, (c_records_client, c_records_server)) in con_records {
+            for (p, (c_records_client, mut c_records_server)) in con_records {
+                info!("Pipeline {}:", p);
                 let mut completed_count_c = 0;
-                debug!("Pipeline {}:", p);
-                c_records_client.iter().enumerate().for_each(|(i, c)| {
-                    debug!("{:6}: {}", i, c);
-                if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
-                        completed_count_c += 1
-                    };
+                if c_records_client.len() > 0 {
+                    let mut min = c_records_client.iter().last().unwrap().1;
+                    let mut max = min;
+                    c_records_client.iter().enumerate().for_each(|(i, (_, c))| {
+                        let uuid=c.uuid.as_ref().unwrap();
+                        let c_server = c_records_server.remove(uuid);
+                        info!("{:6}: {}", i, c);
+                        if c_server.is_some() { info!("        {}", c_server.unwrap()); }
+                        if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
+                            completed_count_c += 1
+                        }
+                        if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c }
+                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c }
+                        if i == (c_records_client.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                            let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                            info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
+                        }
+                    });
+                }
+
+                info!("unbound server-side connections ({})", c_records_server.len());
+                c_records_server.iter().enumerate().for_each(|(i,(_,c))| {
+                    info!("{:6}: {}", i, c);
                 });
 
 
                 let mut completed_count_s=0;
-                c_records_server.iter().enumerate().for_each(|(i, c)| {
+                c_records_server.iter().enumerate().for_each(|(i, (_, c))| {
                     debug!("{:6}: {}", i, c);
                     if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
                         completed_count_s += 1

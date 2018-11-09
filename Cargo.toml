@@ -1,6 +1,6 @@
 [package]
 name = "trafficengine"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Rainer Stademann <rainer.stademann@silverengine.de>"]
 
 [lib]
@@ -14,22 +14,23 @@ path = "src/bin.rs"
 
 [dependencies]
 e2d2 = { version = "=0.3.4", path = "../../work/NetBricks/framework", features = ["performance"] }
+netfcts={ version="0.1.0", path = "./netfcts" }
 rand = "0.3"
 fnv = "*"
-log = "0.4"
-env_logger = "0.5"
+log = ">=0.4"
+env_logger = ">=0.5"
 ctrlc = { version = ">=3.1", features = ["termination"] }
 time = ">=0.1.0"
-ipnet = "1.0"
 toml = "0.4"
 separator =  ">= 0.3"
 serde = "1.0"
-serde_derive = "1.0"
+serde_derive = ">=1.0"
 eui48 = { version= "0.3", features=["serde"] }
 error-chain = ">=0.12"
-uuid = { version = ">=0.7", features = ["v4"] }
+uuid = { version = ">=0.7", features = ["v4", "serde"] }
 bincode = "*"
 serde_json = "*"
+ipnet = ">=1.0"
 
 [features]
 

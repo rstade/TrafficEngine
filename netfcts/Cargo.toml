@@ -1,0 +1,15 @@
+[package]
+name = "netfcts"
+version = "0.1.0"
+authors = ["rstade <rainer.stademann@silverengine.de>"]
+
+[dependencies]
+eui48 = { version= "0.3", features=["serde"] }
+uuid = { version = ">=0.7", features = ["v4", "serde"] }
+serde_derive = ">=1.0"
+serde = ">=1.0"
+e2d2 = { version = "=0.3.4", path = "../../NetBricks/framework", features = ["performance"] }
+log = ">=0.4"
+env_logger = ">=0.5"
+ipnet = ">=1.0"
+separator =  ">= 0.3"
