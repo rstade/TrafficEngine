@@ -1,6 +1,6 @@
 [package]
 name = "trafficengine"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Rainer Stademann <rainer.stademann@silverengine.de>"]
 
 [lib]
@@ -13,8 +13,8 @@ path = "src/bin.rs"
 
 
 [dependencies]
-e2d2 = { version = "=0.3.4", path = "../../work/NetBricks/framework", features = ["performance"] }
-netfcts={ version="0.1.0", path = "./netfcts" }
+e2d2 = { version = "=0.3.5", path = "../../work/NetBricks/framework", features = ["performance"] }
+netfcts={ version="0.1.1", path = "../netfcts" }
 rand = "0.3"
 fnv = "*"
 log = ">=0.4"
