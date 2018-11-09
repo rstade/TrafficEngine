@@ -9,7 +9,7 @@ It may be used for (load-)testing  TCP based application servers and TCP proxies
 
 Scaling happens by steering the incoming server side TCP connections based on the TCP port to the appropriate core which handles the connection.  Therefore port resources are assigned to cores (based on paramater _dst_port_mask_ in the configuration file).    
 
-TrafficEngine builds on [Netbricks](https://github.com/NetSys/NetBricks) which itself utilizes DPDK for user-space networking.
+TrafficEngine builds on [Netbricks](https://github.com/NetSys/NetBricks) which itself utilizes DPDK for user-space networking. Starting with version 0.2.0 more generic code is moved to an application independent crate _netfcts_ (in sub-directory netfcts).
 
 _**TrafficEngine Installation**_
 
