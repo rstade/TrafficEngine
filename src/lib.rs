@@ -522,11 +522,12 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                 Ok(SchedulerReply::PerformanceData(core, map)) => {
                     for d in map {
                         info!(
-                            "{:2}: {:20} {:>15} count= {:12}",
+                            "{:2}: {:20} {:>15} count= {:12}, queue length= {}",
                             core,
                             (d.1).0,
                             (d.1).1.separated_string(),
                             (d.1).2.separated_string(),
+                            (d.1).3
                         )
                     }
                 }

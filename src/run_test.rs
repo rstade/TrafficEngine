@@ -11,8 +11,10 @@ use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, Shutdown, Ipv4A
 use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::collections::{HashSet, HashMap};
-use std::io::{Read, Write};
+use std::io::{Read, Write, BufWriter};
 use std::str::FromStr;
+use std::error::Error;
+use std::fs::File;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
@@ -302,6 +304,13 @@ pub fn run_test(test_type: TestType) {
                     }
                 }
 
+                let mut file = match File::create("c_records.txt") {
+                    Err(why) => panic!("couldn't create c_records.txt: {}",
+                                       why.description()),
+                    Ok(file) => file,
+                };
+                let mut f = BufWriter::new(file);
+
                 if test_type == TestType::Server {
                     for (p, (_, c_records)) in &con_records {
                         debug!("Pipeline {}:", p);
@@ -310,7 +319,8 @@ pub fn run_test(test_type: TestType) {
                             let mut min = c_records.iter().last().unwrap().1;
                             let mut max = min;
                             c_records.iter().enumerate().for_each(|(i, (_, c))| {
-                                info!("{:6}: {}", i, c);
+                                let line = format!("{:6}: {}\n", i, c);
+                                f.write_all(line.as_bytes()).expect("cannot write c_records");
                                 if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
                                     completed_count += 1
                                 }
@@ -345,8 +355,10 @@ pub fn run_test(test_type: TestType) {
                     for (p, (c_records, _)) in &con_records {
                         let mut completed_count = 0;
                         info!("Pipeline {}:", p);
+                        f.write_all(format!("Pipeline {}:", p).as_bytes()).expect("cannot write c_records");
                         c_records.iter().enumerate().for_each(|(i, (_, c))| {
-                            info!("{:6}: {}", i, c);
+                            let line = format!("{:6}: {}\n", i, c);
+                            f.write_all(line.as_bytes()).expect("cannot write c_records");
                             if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
                                 completed_count += 1
                             };

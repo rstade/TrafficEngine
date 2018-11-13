@@ -4,7 +4,7 @@ use e2d2::allocators::CacheAligned;
 use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::*;
 use e2d2::utils::ipv4_extract_flow;
-use e2d2::queues::new_mpsc_queue_pair;
+use e2d2::queues::{new_mpsc_queue_pair, new_mpsc_queue_pair_with_size};
 use e2d2::headers::EndOffset;
 use e2d2::utils;
 
@@ -145,7 +145,7 @@ pub fn setup_generator(
 
     // we create SYN packets and merge them with the upstream coming from the pci i/f
     let tx_clone = tx.clone();
-    let (packet_producer, packet_consumer) = new_mpsc_queue_pair();
+    let (packet_producer, packet_consumer) = new_mpsc_queue_pair_with_size(64);
     let creator = PacketInjector::new(packet_producer, &me, 0);
 
     let mut counter_to = TcpCounter::new();
@@ -158,7 +158,7 @@ pub fn setup_generator(
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
     //TODO calculate tick_length
-    let tick_generator = TickGenerator::new(producer_timerticks, &me, 22700);
+    let tick_generator = TickGenerator::new(producer_timerticks, &me, 22700); // 22700 => 10 ms on my server
     assert!(wheel_c.resolution() > tick_generator.tick_length());
     let wheel_tick_reduction_factor = wheel_c.resolution() / tick_generator.tick_length();
     let mut ticks = 0;
@@ -177,7 +177,7 @@ pub fn setup_generator(
             consumer_timerticks.compose(),
             l2groups.get_group(1).unwrap().compose(),
         ],
-        vec![0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 1],
+        vec![2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1],
     );
     // group 0 -> dump packets
     // group 1 -> send to PCI
@@ -504,7 +504,7 @@ pub fn setup_generator(
                 match hs.mac.etype() {
                     PRIVATE_ETYPE_PACKET => {
                         let no_ready_connections = cm_c.ready_connections();
-                        if counter_to[TcpStatistics::SentSyn] < nr_connections && no_ready_connections <= 100 {
+                        if counter_to[TcpStatistics::SentSyn] < nr_connections && no_ready_connections <= 64 {
                             if let Some(c) = cm_c.create(TcpRole::Client) {
                                 generate_syn(
                                     p,
@@ -701,6 +701,7 @@ pub fn setup_generator(
                         } else {
                             // client side
                             // check that flow steering worked:
+                            if !cm_c.owns_tcp_port(hs.tcp.dst_port()) { error!("{}", hs.tcp) }
                             assert!(cm_c.owns_tcp_port(hs.tcp.dst_port()));
                             let mut c = cm_c.get_mut_by_port(hs.tcp.dst_port());
                             if c.is_some() {
@@ -828,22 +829,10 @@ pub fn setup_generator(
     let l4pciflow = l4groups.get_group(1).unwrap().compose();
     let l4dumpflow = l4groups.get_group(0).unwrap().filter(box move |_| false).compose();
     let pipe2pci = merge(vec![l4pciflow, l4dumpflow]).send(pci.clone());
-    /*
-    let uuid_pipe2kni = Uuid::new_v4();
-    let name = String::from("Pipe2Kni");
-    sched.add_runnable(Runnable::from_task(uuid_pipe2kni, name, pipe2kni).unready());
-    tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2kni, TaskType::Pipe2Kni))
-        .unwrap();
-    */
+
     let uuid_pipe2kni = install_task(sched, "Pipe2Kni",  pipe2kni);
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2kni, TaskType::Pipe2Kni)).unwrap();
-    /*
-    let uuid_pipe2pci = Uuid::new_v4();
-    let name = String::from("Pipe2Pci");
-    sched.add_runnable(Runnable::from_task(uuid_pipe2pci, name, pipe2pci).unready());
-    tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2pci, TaskType::Pipe2Pci))
-        .unwrap();
-*/
+
     let uuid_pipe2pic = install_task(sched, "Pipe2Pci",  pipe2pci);
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2pic, TaskType::Pipe2Pci)).unwrap();
 }

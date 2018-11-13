@@ -25,7 +25,7 @@ use traffic_lib::errors::*;
 use traffic_lib::L234Data;
 use traffic_lib::spawn_recv_thread;
 use traffic_lib::ReleaseCause;
-use traffic_lib::{TcpState};
+use traffic_lib::TcpState;
 
 use std::collections::{HashSet, HashMap};
 use std::env;
@@ -36,6 +36,9 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
 use std::str::FromStr;
+use std::io::{Write, BufWriter};
+use std::error::Error;
+use std::fs::File;
 
 use separator::Separatable;
 use ipnet::Ipv4Net;
@@ -131,132 +134,154 @@ pub fn main() {
     match initialize_system(&mut netbricks_configuration)
         .map_err(|e| e.into())
         .and_then(|ctxt| check_system(ctxt))
-    {
-        Ok(mut context) => {
-            let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
-            context.start_schedulers();
+        {
+            Ok(mut context) => {
+                let flowdirector_map = initialize_flowdirector(&context, configuration.flow_steering_mode(), &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap());
+                context.start_schedulers();
 
-            let (mtx, mrx) = channel::<MessageFrom>();
-            let (reply_mtx, reply_mrx) = channel::<MessageTo>();
+                let (mtx, mrx) = channel::<MessageFrom>();
+                let (reply_mtx, reply_mrx) = channel::<MessageTo>();
 
-            let config_cloned = configuration.clone();
-            let mtx_clone = mtx.clone();
+                let config_cloned = configuration.clone();
+                let mtx_clone = mtx.clone();
 
-            context.add_pipeline_to_run(Box::new(
-                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                    setup_pipelines(
-                        core,
-                        config_cloned.test_size.unwrap(), // no of packets to generate per pipeline
-                        p,
-                        s,
-                        &config_cloned.engine,
-                        l234data.clone(),
-                        flowdirector_map.clone(),
-                        mtx_clone.clone(),
-                    );
-                },
-            ));
+                context.add_pipeline_to_run(Box::new(
+                    move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+                        setup_pipelines(
+                            core,
+                            config_cloned.test_size.unwrap(), // no of packets to generate per pipeline
+                            p,
+                            s,
+                            &config_cloned.engine,
+                            l234data.clone(),
+                            flowdirector_map.clone(),
+                            mtx_clone.clone(),
+                        );
+                    },
+                ));
 
-            let cores = context.active_cores.clone();
+                let cores = context.active_cores.clone();
 
-            // start the controller
-            spawn_recv_thread(mrx, context, configuration);
+                // start the controller
+                spawn_recv_thread(mrx, context, configuration);
 
-            // give threads some time to do initialization work
-            thread::sleep(Duration::from_millis(1000 as u64));
+                // give threads some time to do initialization work
+                thread::sleep(Duration::from_millis(1000 as u64));
 
-            // start generator
-            mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
+                // start generator
+                mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
 
-            thread::sleep(Duration::from_millis(1000 as u64));
-            //main loop
-            println!("press ctrl-c to terminate engine ...");
-            while running.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-            }
+                thread::sleep(Duration::from_millis(1000 as u64));
+                //main loop
+                println!("press ctrl-c to terminate engine ...");
+                while running.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+                }
 
-            mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
-            thread::sleep(Duration::from_millis(100 as u64));
-            mtx.send(MessageFrom::FetchCounter).unwrap();
-            mtx.send(MessageFrom::FetchCRecords).unwrap();
+                mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
+                thread::sleep(Duration::from_millis(100 as u64));
+                mtx.send(MessageFrom::FetchCounter).unwrap();
+                mtx.send(MessageFrom::FetchCRecords).unwrap();
 
-            let mut tcp_counters_to = HashMap::new();
-            let mut tcp_counters_from = HashMap::new();
-            let mut con_records = HashMap::new();
+                let mut tcp_counters_to = HashMap::new();
+                let mut tcp_counters_from = HashMap::new();
+                let mut con_records = HashMap::new();
 
-            loop {
-                match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)) => {
-                        info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
-                        info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
-                        tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
-                        tcp_counters_from.insert(pipeline_id, tcp_counter_from);
-                    }
-                    Ok(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server)) => {
-                        con_records.insert(pipeline_id, (c_records_client, c_records_server));
-                    }
-                    Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                    Err(RecvTimeoutError::Timeout) => {
-                        break;
-                    }
-                    Err(e) => {
-                        error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
-                        break;
+                loop {
+                    match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
+                        Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)) => {
+                            info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
+                            info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
+                            tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
+                            tcp_counters_from.insert(pipeline_id, tcp_counter_from);
+                        }
+                        Ok(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server)) => {
+                            con_records.insert(pipeline_id, (c_records_client, c_records_server));
+                        }
+                        Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
+                        Err(RecvTimeoutError::Timeout) => {
+                            break;
+                        }
+                        Err(e) => {
+                            error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                            break;
+                        }
                     }
                 }
-            }
 
-            for (p, (c_records_client, mut c_records_server)) in con_records {
-                info!("Pipeline {}:", p);
-                let mut completed_count_c = 0;
-                if c_records_client.len() > 0 {
-                    let mut min = c_records_client.iter().last().unwrap().1;
-                    let mut max = min;
-                    c_records_client.iter().enumerate().for_each(|(i, (_, c))| {
-                        let uuid=c.uuid.as_ref().unwrap();
-                        let c_server = c_records_server.remove(uuid);
-                        info!("{:6}: {}", i, c);
-                        if c_server.is_some() { info!("        {}", c_server.unwrap()); }
-                        if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
-                            completed_count_c += 1
-                        }
-                        if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c }
-                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c }
-                        if i == (c_records_client.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
-                            let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                            info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
-                        }
+                let mut file = match File::create("c_records.txt") {
+                    Err(why) => panic!("couldn't create c_records.txt: {}",
+                                       why.description()),
+                    Ok(file) => file,
+                };
+                let mut f = BufWriter::new(file);
+
+                for (p, (c_records_client, mut c_records_server)) in con_records {
+                    println!("Pipeline {}:", p);
+                    let mut completed_count_c = 0;
+                    let mut completed_count_s = 0;
+                    c_records_server.iter().enumerate().for_each(|(_i, (_, c))| {
+                        if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
+                            completed_count_s += 1
+                        };
                     });
+
+                    if c_records_client.len() > 0 {
+                        let mut min = c_records_client.iter().last().unwrap().1;
+                        let mut max = min;
+                        c_records_client.iter().enumerate().for_each(|(i, (_, c))| {
+                            let uuid = c.uuid.as_ref().unwrap();
+                            let c_server = c_records_server.remove(uuid);
+                            let line = format!("{:6}: {}\n", i, c);
+                            f.write_all(line.as_bytes()).expect("cannot write c_records");
+                            if c_server.is_some() {
+                                let c_server = c_server.unwrap();
+                                let line= format!("        ({:?}, port={}, {:?}, {:?}, +{}, {:?})",
+                                         c_server.role,
+                                         c_server.port,
+                                         c_server.states(),
+                                         c_server.get_release_cause(),
+                                         (c_server.get_first_stamp().unwrap()-c.get_first_stamp().unwrap()).separated_string(),
+                                         c_server.deltas_since_synsent_or_synrecv()
+                                             .iter()
+                                             .map(|u| u.separated_string())
+                                             .collect::<Vec<_>>(),
+                                );
+                                f.write_all(line.as_bytes()).expect("cannot write c_records");
+                            }
+                            if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
+                                completed_count_c += 1
+                            }
+                            if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) { min = c }
+                            if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c }
+                            if i == (c_records_client.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
+                                let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                                info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
+                            }
+                        });
+                    }
+
+                    info!("unbound server-side connections ({})", c_records_server.len());
+                    c_records_server.iter().enumerate().for_each(|(i, (_, c))| {
+                        info!("{:6}: {}", i, c);
+                    });
+
+
+                    info!("{} completed client connections", completed_count_c);
+                    info!("{} completed server connections", completed_count_s);
                 }
 
-                info!("unbound server-side connections ({})", c_records_server.len());
-                c_records_server.iter().enumerate().for_each(|(i,(_,c))| {
-                    info!("{:6}: {}", i, c);
-                });
+                mtx.send(MessageFrom::Exit).unwrap();
 
-
-                let mut completed_count_s=0;
-                c_records_server.iter().enumerate().for_each(|(i, (_, c))| {
-                    debug!("{:6}: {}", i, c);
-                    if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
-                        completed_count_s += 1
-                    };
-                });
-                info!("{} completed client connections", completed_count_c);
-                info!("{} completed server connections", completed_count_s);
+                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+                std::process::exit(0);
             }
-
-            mtx.send(MessageFrom::Exit).unwrap();
-
-            thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-            std::process::exit(0);
-        }
-        Err(ref e) => {
-            error!("Error: {}", e);
-            if let Some(backtrace) = e.backtrace() {
-                debug!("Backtrace: {:?}", backtrace);
+            Err(ref e) => {
+                error!("Error: {}", e);
+                if let Some(backtrace) = e.backtrace() {
+                    debug!("Backtrace: {:?}", backtrace);
+                }
+                std::process::exit(1);
             }
-            std::process::exit(1);
         }
-    }
 }

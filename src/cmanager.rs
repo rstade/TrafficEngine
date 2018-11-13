@@ -142,7 +142,7 @@ impl ConnectionManagerC {
         let cm = ConnectionManagerC {
             con_records: HashMap::with_capacity(MAX_CONNECTIONS),
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
-            free_ports: (tcp_port_base..max_tcp_port).collect(),
+            free_ports: ((if tcp_port_base==0 { 1 } else { tcp_port_base }) ..max_tcp_port).collect(), // port 0 is reserved and not usable for us
             ready: VecDeque::with_capacity(MAX_CONNECTIONS),    // connections which became Established (but may not longer be)
             pci,
             pipeline_id,
@@ -151,7 +151,7 @@ impl ConnectionManagerC {
             ip,
         };
         // we use the port with # max_tcp_port for returning traffic to us, do not add it to free_ports
-        debug!(
+        info!(
             "created ConnectionManager {} for port {}, rxq {}, ip= {}, tcp ports {} - {}",
             old_manager_count,
             PacketRx::port_id(&cm.pci),
