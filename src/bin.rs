@@ -172,12 +172,13 @@ pub fn main() {
                 mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
 
                 thread::sleep(Duration::from_millis(1000 as u64));
+ /*
                 //main loop
                 println!("press ctrl-c to terminate engine ...");
                 while running.load(Ordering::SeqCst) {
                     thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
                 }
-
+*/
                 mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
                 thread::sleep(Duration::from_millis(100 as u64));
                 mtx.send(MessageFrom::FetchCounter).unwrap();
@@ -220,24 +221,30 @@ pub fn main() {
                     println!("Pipeline {}:", p);
                     let mut completed_count_c = 0;
                     let mut completed_count_s = 0;
-                    c_records_server.iter().enumerate().for_each(|(_i, (_, c))| {
+                    let mut by_uuid=HashMap::with_capacity(c_records_server.len());
+                    c_records_server.iter().enumerate().for_each(|(_i,  c)| {
                         if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
                             completed_count_s += 1
                         };
+                        by_uuid.insert(c.uuid.unwrap(), c);
                     });
 
+                    let mut vec_client: Vec<_> = c_records_client.iter().collect();
+                    vec_client.sort_by( |a, b| a.port.cmp(&b.port));
+
                     if c_records_client.len() > 0 {
-                        let mut min = c_records_client.iter().last().unwrap().1;
+                        let mut min = c_records_client.iter().last().unwrap();
                         let mut max = min;
-                        c_records_client.iter().enumerate().for_each(|(i, (_, c))| {
+                        vec_client.iter().enumerate().for_each(|(i, c)| {
                             let uuid = c.uuid.as_ref().unwrap();
-                            let c_server = c_records_server.remove(uuid);
+                            let c_server = by_uuid.remove(uuid);
                             let line = format!("{:6}: {}\n", i, c);
                             f.write_all(line.as_bytes()).expect("cannot write c_records");
                             if c_server.is_some() {
                                 let c_server = c_server.unwrap();
-                                let line= format!("        ({:?}, port={}, {:?}, {:?}, +{}, {:?})",
+                                let line= format!("        ({:?}, sock={:21}, port={}, {:?}, {:?}, +{}, {:?})\n",
                                          c_server.role,
+                                         if c_server.sock.is_some() { c_server.sock.unwrap().to_string() } else { "none".to_string() },
                                          c_server.port,
                                          c_server.states(),
                                          c_server.get_release_cause(),
@@ -262,7 +269,7 @@ pub fn main() {
                     }
 
                     info!("unbound server-side connections ({})", c_records_server.len());
-                    c_records_server.iter().enumerate().for_each(|(i, (_, c))| {
+                    by_uuid.iter().enumerate().for_each(|(i, (_, c))| {
                         info!("{:6}: {}", i, c);
                     });
 
@@ -270,6 +277,8 @@ pub fn main() {
                     info!("{} completed client connections", completed_count_c);
                     info!("{} completed server connections", completed_count_s);
                 }
+
+                f.flush().expect("cannot flush BufWriter");
 
                 mtx.send(MessageFrom::Exit).unwrap();
 

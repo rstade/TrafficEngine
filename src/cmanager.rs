@@ -7,9 +7,10 @@ use std::mem;
 use e2d2::headers::MacHeader;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PacketRx, PortQueue, L4Flow};
+use e2d2::utils;
 
-use netfcts::timer_wheel::{TimerWheel};
-use { PipelineId,};
+use netfcts::timer_wheel::TimerWheel;
+use PipelineId;
 use uuid::Uuid;
 use netfcts::tcp_common::*;
 use netfcts::ConRecord;
@@ -18,9 +19,12 @@ use netfcts::ConRecord;
 #[derive(Clone)]
 pub struct Connection {
     pub con_rec: ConRecord,
-    pub seqn_nxt: u32,    // next client side sequence no towards DUT
-    pub seqn_una: u32,    // oldest unacknowledged sequence no
-    pub ackn_nxt: u32,    // current ack no towards DUT (expected seqn)
+    pub seqn_nxt: u32,
+    // next client side sequence no towards DUT
+    pub seqn_una: u32,
+    // oldest unacknowledged sequence no
+    pub ackn_nxt: u32,
+    // current ack no towards DUT (expected seqn)
     pub dut_mac: MacHeader, // server side mac, i.e. mac of DUT
 }
 
@@ -42,12 +46,6 @@ impl Connection {
             dut_mac: MacHeader::default(),
             con_rec: ConRecord::new(),
         }
-    }
-
-    fn new_with_sock(sock: &SocketAddrV4, role: TcpRole) -> Connection {
-        let mut connection= Connection::new();
-        connection.initialize(Some(sock), 0, role);
-        connection
     }
 
     #[inline]
@@ -88,10 +86,10 @@ impl Connection {
     }
 
     #[inline]
-    pub fn set_uuid(&mut self, uuid: Option<Uuid>)-> Option<Uuid> { mem::replace(&mut self.con_rec.uuid, uuid) }
+    pub fn set_uuid(&mut self, uuid: Option<Uuid>) -> Option<Uuid> { mem::replace(&mut self.con_rec.uuid, uuid) }
 
     #[inline]
-    pub fn get_uuid(&self)-> &Option<Uuid> { &self.con_rec.uuid }
+    pub fn get_uuid(&self) -> &Option<Uuid> { &self.con_rec.uuid }
 
     #[inline]
     pub fn make_uuid(&mut self) -> &Uuid {
@@ -115,19 +113,22 @@ impl fmt::Display for Connection {
 pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub struct ConnectionManagerC {
-    con_records: HashMap<Uuid, ConRecord>,
+    c_record_store: Vec<ConRecord>,
     free_ports: VecDeque<u16>,
-    ready: VecDeque<u16>,  // ports of connections with data to send and in state Established when enqueued
+    ready: VecDeque<u16>,
+    // ports of connections with data to send and in state Established when enqueued
     port2con: Vec<Connection>,
-    pci: CacheAligned<PortQueue>, // the PortQueue for which connections are managed
+    pci: CacheAligned<PortQueue>,
+    // the PortQueue for which connections are managed
     pipeline_id: PipelineId,
     tcp_port_base: u16,
-    special_port: u16, // e.g. used as a listen port, not assigned by create
+    special_port: u16,
+    // e.g. used as a listen port, not assigned by create
     ip: u32,    // ip address to use for connections of this manager
 }
 
 
-const MAX_CONNECTIONS:usize = 0xFFFF as usize;
+const MAX_CONNECTIONS: usize = 0xFFFF as usize;
 
 impl ConnectionManagerC {
     pub fn new(
@@ -139,10 +140,13 @@ impl ConnectionManagerC {
         let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let max_tcp_port: u16 = tcp_port_base + !port_mask;
+        let mut store=Vec::with_capacity(MAX_CONNECTIONS);
+        store.push(ConRecord::new());
+        store.pop();    // warming the Vec up! obviously when storing the first element in a Vec expensive initialization code runs
         let cm = ConnectionManagerC {
-            con_records: HashMap::with_capacity(MAX_CONNECTIONS),
+            c_record_store: store,
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
-            free_ports: ((if tcp_port_base==0 { 1 } else { tcp_port_base }) ..max_tcp_port).collect(), // port 0 is reserved and not usable for us
+            free_ports: ((if tcp_port_base == 0 { 1 } else { tcp_port_base })..max_tcp_port).collect(), // port 0 is reserved and not usable for us
             ready: VecDeque::with_capacity(MAX_CONNECTIONS),    // connections which became Established (but may not longer be)
             pci,
             pipeline_id,
@@ -261,28 +265,28 @@ impl ConnectionManagerC {
         let c = &mut self.port2con[(port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
         if c.in_use() {
-            self.con_records.insert(c.get_uuid().unwrap(), c.con_rec.clone());
+            self.c_record_store.push(c.con_rec.clone());
             self.free_ports.push_back(port);
             assert_eq!(port, c.port());
             c.set_port(0u16); // this indicates an unused connection,
-                                // we keep unused connection in port2con table
+            // we keep unused connection in port2con table
         }
     }
 
     // pushes all uncompleted connections to the connection record store
     pub fn record_uncompleted(&mut self) {
-        let c_records = &mut self.con_records;
+        let c_records = &mut self.c_record_store;
         self.port2con.iter().for_each(|c| {
             if c.port() != 0 {
-                c_records.insert(c.get_uuid().unwrap(), c.con_rec.clone());
+                c_records.push(c.con_rec.clone());
             }
         });
     }
 
     #[allow(dead_code)]
     pub fn dump_records(&mut self) {
-        info!("{}: {:6} closed connections", self.pipeline_id, self.con_records.len());
-        self.con_records.iter().enumerate().for_each(|(i, (_, c))| debug!("{:6}: {}", i, c));
+        info!("{}: {:6} closed connections", self.pipeline_id, self.c_record_store.len());
+        self.c_record_store.iter().enumerate().for_each(|(i,  c)| debug!("{:6}: {}", i, c));
         info!(
             "{}: {:6} open connections",
             self.pipeline_id,
@@ -295,12 +299,12 @@ impl ConnectionManagerC {
         });
     }
 
-    pub fn fetch_c_records(&mut self) -> HashMap<Uuid, ConRecord> {
-        mem::replace(&mut self.con_records, HashMap::with_capacity(MAX_CONNECTIONS)) // we are "moving" the con_records out, and replace it with a new one
+    pub fn fetch_c_records(&mut self) -> Vec<ConRecord> {
+        mem::replace(&mut self.c_record_store, Vec::with_capacity(MAX_CONNECTIONS)) // we are "moving" the con_records out, and replace it with a new one
     }
 
     #[inline]
-    pub fn set_ready_connection(&mut self, port: u16)  {
+    pub fn set_ready_connection(&mut self, port: u16) {
         self.ready.push_back(port);
     }
 
@@ -308,20 +312,20 @@ impl ConnectionManagerC {
     pub fn ready_connections(&self) -> usize { self.ready.len() }
 
     pub fn get_ready_connection(&mut self) -> Option<&mut Connection> {
-        let mut port_result=None;
+        let mut port_result = None;
         while port_result.is_none() {
             match self.ready.pop_front() {
                 Some(port) => {
-                    let c=&self.port2con[(port - self.tcp_port_base) as usize];
-                    if c.port() !=0 && *c.con_rec.last_state()==TcpState::Established {
-                        port_result=Some(port)
+                    let c = &self.port2con[(port - self.tcp_port_base) as usize];
+                    if c.port() != 0 && *c.con_rec.last_state() == TcpState::Established {
+                        port_result = Some(port)
                     }
-                },
+                }
                 None => break, // ready queue is empty
             };
         }
         // borrow checker forces us this two-step way, cannot mutably borrow connection directly
-        if let Some(port)=port_result {
+        if let Some(port) = port_result {
             Some(&mut self.port2con[(port - self.tcp_port_base) as usize])
         } else {
             None
@@ -338,46 +342,72 @@ impl ConnectionManagerC {
 
 
 pub struct ConnectionManagerS {
-    con_records: HashMap<Uuid, ConRecord>,
-    connections: HashMap<SocketAddrV4, Box<Connection>>,
+    c_record_store: Vec<ConRecord>,
+    sock2index: HashMap<SocketAddrV4, usize>,
+    connections: Vec<Connection>,
+    free_slots: VecDeque<usize>,
 }
 
 
 impl ConnectionManagerS {
     pub fn new() -> ConnectionManagerS {
-        let cm = ConnectionManagerS {
-            con_records: HashMap::with_capacity(MAX_CONNECTIONS),
-            connections: HashMap::with_capacity(MAX_CONNECTIONS),
-        };
-        cm
-    }
-
-    pub fn insert_new(&mut self, sock: &SocketAddrV4,) -> Option<Box<Connection>> {
-        self.connections.insert(*sock, Box::new(Connection::new_with_sock(sock, TcpRole::Server)))
-    }
-
-    pub fn insert(&mut self, sock: &SocketAddrV4, connection: Box<Connection>) -> Option<Box<Connection>> {
-        self.connections.insert(*sock, connection)
-    }
-
-
-    pub fn get_mut(&mut self, sock: &SocketAddrV4) -> Option<&mut Box<Connection>> {
-        self.connections.get_mut(sock)
-    }
-
-
-    pub fn release_sock(&mut self, sock: &SocketAddrV4) {
-        let c = self.connections.remove(sock);
-        // only if it is in use, i.e. it has been not released already
-        if c.is_some() {
-            let mut c= c.unwrap();
-            if c.get_uuid().is_none() { c.make_uuid(); }
-            self.con_records.insert(c.get_uuid().unwrap(), c.con_rec.clone());
+        let mut store=Vec::with_capacity(MAX_CONNECTIONS);
+        store.push(ConRecord::new());
+        store.pop();    // warming the Vec up! obviously when storing the first element in a Vec expensive initialization code runs
+        ConnectionManagerS {
+            c_record_store: store,
+            sock2index: HashMap::with_capacity(MAX_CONNECTIONS),
+            connections: vec![Connection::new(); MAX_CONNECTIONS],
+            free_slots: (0..MAX_CONNECTIONS).collect(),
         }
+    }
+
+
+    pub fn get_mut(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
+        trace!("get_mut");
+        let index = self.sock2index.get(sock);
+        if index.is_some() { Some(&mut self.connections[*index.unwrap()]) } else { None }
+    }
+
+    pub fn get_mut_or_create(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
+        trace!("get_mut_or_create");
+        {
+            let index = self.sock2index.get(sock);
+            if index.is_some() {
+                return Some(&mut self.connections[*index.unwrap()]);
+            }
+        }
+        // create
+        let index = self.free_slots.pop_front();
+        if index.is_some() {
+            self.sock2index.insert(*sock, index.unwrap());
+            let c = &mut self.connections[index.unwrap()];
+            c.initialize(Some(sock), 0, TcpRole::Server);
+            Some(c)
+        } else {
+            None // out of resources
+        }
+    }
+
+
+    pub fn release_sock(&mut self, sock: &SocketAddrV4) -> u64 {
+        trace!("release_sock");
+        // only if it is in use, i.e. it has been not released already
+        let index = self.sock2index.remove(sock);
+        let mut ts=0;
+        if index.is_some() {
+            let mut c = self.connections[index.unwrap()].clone();
+            if c.get_uuid().is_none() { c.make_uuid(); }
+            self.c_record_store.push(c.con_rec.clone());
+            ts=utils::rdtsc_unsafe();
+            self.free_slots.push_back(index.unwrap());
+        }
+        ts
     }
 
     //TODO allow for more precise time out conditions, currently whole TCP connections are timed out, also we should send a RST
     pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<SocketAddrV4>) {
+        trace!("release_timeouts");
         loop {
             match wheel.tick(now) {
                 (Some(mut drain), more) => {
@@ -412,17 +442,17 @@ impl ConnectionManagerS {
 
     // pushes all uncompleted connections to the connection record store
     pub fn record_uncompleted(&mut self) {
-        let c_records = &mut self.con_records;
-        self.connections.values_mut().for_each(|c| {
+        let c_records = &mut self.c_record_store;
+        let connections = &self.connections;
+        self.sock2index.values().for_each(|i| {
+            let mut c = connections[*i].clone();
             if c.get_uuid().is_none() { c.make_uuid(); }
-            c_records.insert(c.get_uuid().unwrap(), c.con_rec.clone());
+            c_records.push(c.con_rec.clone());
         });
     }
 
 
-    pub fn fetch_c_records(&mut self) -> HashMap<Uuid, ConRecord> {
-        mem::replace(&mut self.con_records, HashMap::with_capacity(MAX_CONNECTIONS)) // we are "moving" the con_records out, and replace it with a new one
+    pub fn fetch_c_records(&mut self) -> Vec<ConRecord> {
+        mem::replace(&mut self.c_record_store, Vec::with_capacity(MAX_CONNECTIONS)) // we are "moving" the con_records out, and replace it with a new one
     }
-
-
 }

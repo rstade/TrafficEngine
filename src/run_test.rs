@@ -28,6 +28,7 @@ use env_logger;
 use serde_json;
 use separator::Separatable;
 use netfcts::{initialize_flowdirector, FlowSteeringMode};
+use uuid::Uuid;
 
 use read_config;
 use get_mac_from_ifname;
@@ -234,7 +235,7 @@ pub fn run_test(test_type: TestType) {
                                 let cdata = CData::new(
                                     SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080),
                                     0xFFFF,
-                                    None,
+                                    Some(Uuid::new_v4()),
                                 );
                                 let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
                                 stream.write(json_string.as_bytes()).expect("cannot write to stream");
@@ -316,9 +317,9 @@ pub fn run_test(test_type: TestType) {
                         debug!("Pipeline {}:", p);
                         if c_records.len() > 0 {
                             let mut completed_count = 0;
-                            let mut min = c_records.iter().last().unwrap().1;
+                            let mut min = c_records.iter().last().unwrap();
                             let mut max = min;
-                            c_records.iter().enumerate().for_each(|(i, (_, c))| {
+                            c_records.iter().enumerate().for_each(|(i, c)| {
                                 let line = format!("{:6}: {}\n", i, c);
                                 f.write_all(line.as_bytes()).expect("cannot write c_records");
                                 if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
@@ -356,7 +357,7 @@ pub fn run_test(test_type: TestType) {
                         let mut completed_count = 0;
                         info!("Pipeline {}:", p);
                         f.write_all(format!("Pipeline {}:", p).as_bytes()).expect("cannot write c_records");
-                        c_records.iter().enumerate().for_each(|(i, (_, c))| {
+                        c_records.iter().enumerate().for_each(|(i,  c)| {
                             let line = format!("{:6}: {}\n", i, c);
                             f.write_all(line.as_bytes()).expect("cannot write c_records");
                             if c.get_release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed {
@@ -366,6 +367,9 @@ pub fn run_test(test_type: TestType) {
                         assert_eq!(completed_count, tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentSyn]);
                     }
                 }
+
+                f.flush().expect("cannot flush BufWriter");
+
                 mtx.send(MessageFrom::Exit).unwrap();
                 thread::sleep(Duration::from_millis(2000));
 

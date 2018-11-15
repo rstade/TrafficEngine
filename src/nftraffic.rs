@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 use serde_json;
+use separator::Separatable;
 
 use netfcts::tcp_common::{TcpState, TcpStatistics, TcpCounter, TcpRole, CData, L234Data, ReleaseCause};
 use cmanager::{Connection, ConnectionManagerC, ConnectionManagerS};
@@ -27,6 +28,7 @@ use netfcts::timer_wheel::{MILLIS_TO_CYCLES, TimerWheel};
 use std::sync::atomic::Ordering;
 
 const MIN_FRAME_SIZE: usize = 60; // without fcs
+const OBSERVE_PORT: u16 = 49152;
 
 #[allow(dead_code)]
 #[allow(unused_variables)]
@@ -194,17 +196,20 @@ pub fn setup_generator(
             box move |p| {
                 // this is the major closure for TCP processing
 
+                let now = || utils::rdtsc_unsafe().separated_string();
+
                 let injector_start = || {
-                    trace!("{} (re-)starting the injector", thread_id_2);
+                    info!("{} (re-)starting the injector at {}", thread_id_2, now());
                     injector_ready_flag.store(true, Ordering::SeqCst);
                 };
 
                 let injector_stop = || {
-                    trace!("{}: stopping the injector", thread_id_2);
+                    info!("{}: stopping the injector at {}", thread_id_2, now());
                     injector_ready_flag.store(false, Ordering::SeqCst);
                 };
 
                 let injector_runs = || injector_ready_flag.load(Ordering::SeqCst);
+
 
                 struct HeaderState<'a> {
                     mac: &'a mut MacHeader,
@@ -226,6 +231,7 @@ pub fn setup_generator(
                     }
                 }
 
+                #[inline]
                 fn do_ttl(h: &mut HeaderState) {
                     let ttl = h.ip.ttl();
                     if ttl >= 1 {
@@ -234,6 +240,7 @@ pub fn setup_generator(
                     h.ip.update_checksum();
                 }
 
+                #[inline]
                 fn make_reply_packet(h: &mut HeaderState, inc: u32) {
                     let smac = h.mac.src;
                     let dmac = h.mac.dst;
@@ -272,6 +279,7 @@ pub fn setup_generator(
 
                 // remove tcp options for SYN and SYN-ACK,
                 // pre-requisite: no payload exists, because any payload is not shifted up
+                #[inline]
                 fn remove_tcp_options<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h: &mut HeaderState) {
                     let old_offset = h.tcp.offset() as u16;
                     if old_offset > 20 {
@@ -285,6 +293,7 @@ pub fn setup_generator(
                     }
                 }
 
+                #[inline]
                 fn syn_received<M: Sized + Send>(
                     p: &mut Packet<TcpHeader, M>,
                     c: &mut Connection,
@@ -307,6 +316,7 @@ pub fn setup_generator(
                     trace!("(SYN-)ACK to client, L3: { }, L4: { }", h.ip, h.tcp);
                 }
 
+                #[inline]
                 fn synack_received<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState) {
                     make_reply_packet(h, 1);
                     c.ackn_nxt = h.tcp.ack_num();
@@ -323,6 +333,7 @@ pub fn setup_generator(
                     p.trim_payload_size(payload_len);
                 }
 
+                #[inline]
                 fn s_reply_with_fin<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState) {
                     make_reply_packet(h, 0);
                     c.ackn_nxt = h.tcp.ack_num();
@@ -410,6 +421,7 @@ pub fn setup_generator(
                     update_tcp_checksum(p, tcp_length, h.ip.src(), h.ip.dst());
                 }
 
+                #[inline]
                 fn passive_close<M: Sized + Send>(
                     p: &mut Packet<TcpHeader, M>,
                     c: &mut Connection,
@@ -420,8 +432,8 @@ pub fn setup_generator(
                     debug!(
                         "{} passive close on src/dst-port {}/{} in state {:?}",
                         thread_id,
-                        hs.tcp.src_port(),
                         c.port(),
+                        hs.tcp.src_port(),
                         c.con_rec.last_state(),
                     );
                     c.con_rec.released(ReleaseCause::PassiveClose);
@@ -434,8 +446,10 @@ pub fn setup_generator(
                     c.seqn_nxt = c.seqn_nxt.wrapping_add(1);
                     update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
                     counter[TcpStatistics::SentFinAck] += 1;
+                    if hs.tcp.src_port() == OBSERVE_PORT { info!("passive close, Sent FinAck {}", utils::rdtsc_unsafe().separated_string()) }
                 };
 
+                #[inline]
                 fn active_close<M: Sized + Send>(
                     p: &mut Packet<TcpHeader, M>,
                     c: &mut Connection,
@@ -480,8 +494,11 @@ pub fn setup_generator(
                     tcp_closed
                 };
 
-                let mut group_index = 0usize; // the index of the group to be returned, default 0: dump packet
+                let timestamp_entry=utils::rdtsc_unsafe();
+                let mut timestamp_1:u64=timestamp_entry;
+                let mut timestamp_2:u64=timestamp_entry;
 
+                let mut group_index = 0usize; // the index of the group to be returned, default 0: dump packet
                 assert!(p.get_pre_header().is_some()); // we must have parsed the headers
                 assert!(p.get_pre_pre_header().is_some()); // we must have parsed the headers
 
@@ -589,16 +606,10 @@ pub fn setup_generator(
                     _ => {
                         if hs.tcp.dst_port() == cm_c.special_port() {
                             //server side
-                            let mut existing_c;
                             let mut opt_c = if hs.tcp.syn_flag() {
                                 debug!("got SYN on special port 0x{:x}", cm_c.special_port());
                                 counter_from[TcpStatistics::RecvSyn] += 1;
-                                //existing_c = cm_s.get_mut(&hs_flow.src_socket_addr());
-                                existing_c = cm_s.insert_new(&hs_flow.src_socket_addr());
-                                if existing_c.is_some() {
-                                    cm_s.insert(&hs_flow.src_socket_addr(), existing_c.unwrap());
-                                }
-                                cm_s.get_mut(&hs_flow.src_socket_addr())
+                                cm_s.get_mut_or_create(&hs_flow.src_socket_addr())
                             } else {
                                 cm_s.get_mut(&hs_flow.src_socket_addr())
                             };
@@ -641,6 +652,7 @@ pub fn setup_generator(
                                         hs_flow.src_socket_addr()
                                     );
                                 } else if hs.tcp.fin_flag() {
+                                    trace!("received FIN");
                                     if old_s_state >= TcpState::FinWait1 {
                                         if active_close(p, c, &mut hs, &thread_id_2, &mut counter_from, &old_s_state) {
                                             release_connection_s = Some(hs_flow.src_socket_addr());
@@ -652,6 +664,7 @@ pub fn setup_generator(
                                         group_index = 1;
                                     }
                                 } else if hs.tcp.rst_flag() {
+                                    trace!("received RST");
                                     counter_from[TcpStatistics::RecvRst] += 1;
                                     c.con_rec.push_state(TcpState::Closed);
                                     c.con_rec.released(ReleaseCause::PassiveRst);
@@ -659,19 +672,22 @@ pub fn setup_generator(
                                     release_connection_s = Some(hs_flow.src_socket_addr());
                                 } else if old_s_state == TcpState::LastAck
                                     && hs.tcp.ack_flag()
-                                    && hs.tcp.ack_num() == c.seqn_nxt
-                                    {
+                                    && hs.tcp.ack_num() == c.seqn_nxt {
                                         // received final ack in passive close
+                                        trace!("received final ACK in passive close");
                                         counter_from[TcpStatistics::RecvFinAck2] += 1;
                                         c.con_rec.push_state(TcpState::Closed);
                                         c.con_rec.released(ReleaseCause::PassiveClose);
                                         // release connection in the next block
                                         release_connection_s = Some(hs_flow.src_socket_addr());
-                                    } else if old_s_state >= TcpState::Established {
+                                } else if old_s_state >= TcpState::Established {
                                     if hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
                                         match old_s_state {
                                             TcpState::FinWait1 => c.con_rec.push_state(TcpState::FinWait2),
-                                            TcpState::Closing => c.con_rec.push_state(TcpState::Closed),
+                                            TcpState::Closing => {
+                                                c.con_rec.push_state(TcpState::Closed);
+                                                release_connection_s = Some(hs_flow.src_socket_addr());
+                                            },
                                             _ => (),
                                         }
                                     }
@@ -802,7 +818,10 @@ pub fn setup_generator(
                 // here we check if we shall release the connection state,
                 // need this cumbersome way because of borrow checker for the connection managers
                 if let Some(sock) = release_connection_s {
-                    cm_s.release_sock(&sock);
+                    timestamp_1 = cm_s.release_sock(&sock);
+                    let used_cycles=utils::rdtsc_unsafe()-timestamp_entry;
+                    debug!("releasing server connection with sock {}, took {}, {}, {} cy ", sock, used_cycles, timestamp_1-timestamp_entry, timestamp_2-timestamp_entry );
+//                    info!("releasing server connection with sock {}, took {} cy ", sock, used_cycles,);
                 }
                 if let Some(sport) = release_connection_c {
                     //debug!("releasing port {}", sport);
