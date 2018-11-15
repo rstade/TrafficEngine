@@ -217,8 +217,17 @@ pub fn main() {
                 };
                 let mut f = BufWriter::new(file);
 
-                for (p, (c_records_client, mut c_records_server)) in con_records {
-                    println!("Pipeline {}:", p);
+                //we are searching for the most extreme time stamps over all pipes
+                let mut min_total;
+                let mut max_total;
+                let mut total_connections = 0;
+                {
+                    let cc = &(con_records.iter().last().unwrap().1).0;
+                    min_total = cc.last().unwrap().clone();
+                    max_total = min_total.clone();
+                }
+
+                for (p, (mut c_records_client, mut c_records_server)) in con_records {
                     let mut completed_count_c = 0;
                     let mut completed_count_s = 0;
                     let mut by_uuid=HashMap::with_capacity(c_records_server.len());
@@ -229,13 +238,14 @@ pub fn main() {
                         by_uuid.insert(c.uuid.unwrap(), c);
                     });
 
-                    let mut vec_client: Vec<_> = c_records_client.iter().collect();
-                    vec_client.sort_by( |a, b| a.port.cmp(&b.port));
+                    //let mut vec_client: Vec<_> = c_records_client.iter().collect();
+                    c_records_client.sort_by( |a, b| a.port.cmp(&b.port));
 
                     if c_records_client.len() > 0 {
+                        total_connections+=c_records_client.len();
                         let mut min = c_records_client.iter().last().unwrap();
                         let mut max = min;
-                        vec_client.iter().enumerate().for_each(|(i, c)| {
+                        c_records_client.iter().enumerate().for_each(|(i, c)| {
                             let uuid = c.uuid.as_ref().unwrap();
                             let c_server = by_uuid.remove(uuid);
                             let line = format!("{:6}: {}\n", i, c);
@@ -263,20 +273,29 @@ pub fn main() {
                             if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) { max = c }
                             if i == (c_records_client.len() - 1) && min.get_first_stamp().is_some() && max.get_last_stamp().is_some() {
                                 let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                                info!("total used cycles= {}, per connection = {}", total.separated_string(), (total / (i as u64 + 1)).separated_string());
+                                info!("{} total used cycles = {}, per connection = {}", p, total.separated_string(), (total / (i as u64 + 1)).separated_string());
                             }
                         });
+                        if min.get_first_stamp().unwrap_or(u64::max_value()) < min_total.get_first_stamp().unwrap_or(u64::max_value()) { min_total = min.clone() }
+                        if max.get_last_stamp().unwrap_or(0) > max_total.get_last_stamp().unwrap_or(0) { max_total = max.clone() }
                     }
 
-                    info!("unbound server-side connections ({})", c_records_server.len());
+
+                    info!("{} unbound server-side connections ({})", p, by_uuid.len());
                     by_uuid.iter().enumerate().for_each(|(i, (_, c))| {
                         info!("{:6}: {}", i, c);
                     });
 
 
-                    info!("{} completed client connections", completed_count_c);
-                    info!("{} completed server connections", completed_count_s);
+                    info!("{} completed client connections = {}", p, completed_count_c);
+                    info!("{} completed server connections = {}", p, completed_count_s);
                 }
+
+                if min_total.get_first_stamp().is_some() && max_total.get_last_stamp().is_some() {
+                    let total = max_total.get_last_stamp().unwrap() - min_total.get_first_stamp().unwrap();
+                    info!("total used cycles for all pipelines = {}, per connection = {}", total.separated_string(), (total / (total_connections as u64 +1)).separated_string());
+                }
+
 
                 f.flush().expect("cannot flush BufWriter");
 
