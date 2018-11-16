@@ -1,4 +1,5 @@
-use e2d2::operators::{ReceiveBatch, Batch, merge, merge_with_selector};
+//use e2d2::operators::{ReceiveBatch, Batch, merge, merge_with_selector};
+use e2d2::operators::{ReceiveBatch, Batch, merge_auto};
 use e2d2::scheduler::{Runnable, Scheduler, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
@@ -146,9 +147,10 @@ pub fn setup_generator(
     );
 
     // we create SYN packets and merge them with the upstream coming from the pci i/f
+    // the destination port of the created tcp packets is used as discriminator in the pipeline (dst_port 1 is for SYN packet generation)
     let tx_clone = tx.clone();
     let (packet_producer, packet_consumer) = new_mpsc_queue_pair_with_size(64);
-    let creator = PacketInjector::new(packet_producer, &me, 0);
+    let creator = PacketInjector::new(packet_producer, &me, 0, 1u16);
 
     let mut counter_to = TcpCounter::new();
     let mut counter_from = TcpCounter::new();
@@ -172,7 +174,7 @@ pub fn setup_generator(
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_task, TaskType::TickGenerator)).unwrap();
 
     let pipeline_id_clone = pipeline_id.clone();
-
+/*
     let l2_input_stream = merge_with_selector(
         vec![
             packet_consumer.compose(),
@@ -181,6 +183,15 @@ pub fn setup_generator(
         ],
         vec![2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1],
     );
+*/
+    let l2_input_stream = merge_auto(
+        vec![
+            packet_consumer.compose(),
+            consumer_timerticks.compose(),
+            l2groups.get_group(1).unwrap().compose(),
+        ],
+    );
+
     // group 0 -> dump packets
     // group 1 -> send to PCI
     // group 2 -> send to KNI
@@ -844,10 +855,10 @@ pub fn setup_generator(
 
     let l2kniflow = l2groups.get_group(0).unwrap().compose();
     let l4kniflow = l4groups.get_group(2).unwrap().compose();
-    let pipe2kni = merge(vec![l2kniflow, l4kniflow]).send(kni.clone());
+    let pipe2kni = merge_auto(vec![l2kniflow, l4kniflow]).send(kni.clone());
     let l4pciflow = l4groups.get_group(1).unwrap().compose();
     let l4dumpflow = l4groups.get_group(0).unwrap().filter(box move |_| false).compose();
-    let pipe2pci = merge(vec![l4pciflow, l4dumpflow]).send(pci.clone());
+    let pipe2pci = merge_auto(vec![l4pciflow, l4dumpflow]).send(pci.clone());
 
     let uuid_pipe2kni = install_task(sched, "Pipe2Kni",  pipe2kni);
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2kni, TaskType::Pipe2Kni)).unwrap();
