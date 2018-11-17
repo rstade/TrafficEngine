@@ -46,6 +46,7 @@ use errors::*;
 use nftraffic::*;
 use netfcts::tasks::*;
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
+use netfcts::system::SystemData;
 use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
 use ipnet::Ipv4Net;
 
@@ -66,7 +67,6 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::str::FromStr;
 
 
-
 #[derive(Deserialize)]
 struct Config {
     trafficengine: Configuration,
@@ -78,7 +78,6 @@ pub struct Configuration {
     pub engine: EngineConfig,
     pub test_size: Option<usize>,
 }
-
 
 impl Configuration {
     pub fn flow_steering_mode(&self) -> FlowSteeringMode {
@@ -94,6 +93,7 @@ pub struct EngineConfig {
     pub ipnet: String,
     pub timeouts: Option<Timeouts>,
     pub port: u16,
+    pub cps_limit: Option<u64>,
 }
 
 impl EngineConfig {
@@ -105,6 +105,10 @@ impl EngineConfig {
             server_id: "Engine".to_string(),
             index: 0,
         }
+    }
+
+    pub fn cps_limit(&self) -> u64 {
+        self.cps_limit.unwrap_or(10000000)
     }
 }
 
@@ -297,6 +301,7 @@ pub fn setup_pipelines(
     servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
     tx: Sender<MessageFrom>,
+    system_data: SystemData,
 ) {
     let mut kni: Option<&CacheAligned<PortQueue>> = None;
     let mut pci: Option<&CacheAligned<PortQueue>> = None;
@@ -352,10 +357,10 @@ pub fn setup_pipelines(
         engine_config,
         servers,
         flowdirector_map,
-        tx
+        tx,
+        system_data,
     );
 }
-
 
 pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksContext, configuration: Configuration) {
     /*
@@ -402,7 +407,11 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
                     &configuration.engine.mac,
                     &configuration.engine.namespace,
-                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip { context.active_cores.len() +1 } else { 1 },
+                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip {
+                        context.active_cores.len() + 1
+                    } else {
+                        1
+                    },
                 );
             }
         }
@@ -451,9 +460,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                 Ok(MessageFrom::Established(pipe, con_record)) => {
                     info!(
                         "pipe {}: {} -> {} ",
-                        pipe,
-                        con_record,
-                        l234data[con_record.server_index].server_id,
+                        pipe, con_record, l234data[con_record.server_index].server_id,
                     );
                 }
                 Ok(MessageFrom::Task(pipeline_id, uuid, task_type)) => {
@@ -518,7 +525,12 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     break;
                 }
             };
-            match context.reply_receiver.as_ref().unwrap().recv_timeout(Duration::from_millis(10)) {
+            match context
+                .reply_receiver
+                .as_ref()
+                .unwrap()
+                .recv_timeout(Duration::from_millis(10))
+            {
                 Ok(SchedulerReply::PerformanceData(core, map)) => {
                     for d in map {
                         info!(

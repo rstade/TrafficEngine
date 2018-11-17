@@ -15,7 +15,6 @@ use uuid::Uuid;
 use netfcts::tcp_common::*;
 use netfcts::ConRecord;
 
-
 #[derive(Clone)]
 pub struct Connection {
     pub con_rec: ConRecord,
@@ -86,10 +85,14 @@ impl Connection {
     }
 
     #[inline]
-    pub fn set_uuid(&mut self, uuid: Option<Uuid>) -> Option<Uuid> { mem::replace(&mut self.con_rec.uuid, uuid) }
+    pub fn set_uuid(&mut self, uuid: Option<Uuid>) -> Option<Uuid> {
+        mem::replace(&mut self.con_rec.uuid, uuid)
+    }
 
     #[inline]
-    pub fn get_uuid(&self) -> &Option<Uuid> { &self.con_rec.uuid }
+    pub fn get_uuid(&self) -> &Option<Uuid> {
+        &self.con_rec.uuid
+    }
 
     #[inline]
     pub fn make_uuid(&mut self) -> &Uuid {
@@ -124,30 +127,25 @@ pub struct ConnectionManagerC {
     tcp_port_base: u16,
     special_port: u16,
     // e.g. used as a listen port, not assigned by create
-    ip: u32,    // ip address to use for connections of this manager
+    ip: u32, // ip address to use for connections of this manager
 }
-
 
 const MAX_CONNECTIONS: usize = 0xFFFF as usize;
 
 impl ConnectionManagerC {
-    pub fn new(
-        pipeline_id: PipelineId,
-        pci: CacheAligned<PortQueue>,
-        l4flow: &L4Flow,
-    ) -> ConnectionManagerC {
+    pub fn new(pipeline_id: PipelineId, pci: CacheAligned<PortQueue>, l4flow: &L4Flow) -> ConnectionManagerC {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
         let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let max_tcp_port: u16 = tcp_port_base + !port_mask;
-        let mut store=Vec::with_capacity(MAX_CONNECTIONS);
+        let mut store = Vec::with_capacity(MAX_CONNECTIONS);
         store.push(ConRecord::new());
-        store.pop();    // warming the Vec up! obviously when storing the first element in a Vec expensive initialization code runs
+        store.pop(); // warming the Vec up! obviously when storing the first element in a Vec expensive initialization code runs
         let cm = ConnectionManagerC {
             c_record_store: store,
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
             free_ports: ((if tcp_port_base == 0 { 1 } else { tcp_port_base })..max_tcp_port).collect(), // port 0 is reserved and not usable for us
-            ready: VecDeque::with_capacity(MAX_CONNECTIONS),    // connections which became Established (but may not longer be)
+            ready: VecDeque::with_capacity(MAX_CONNECTIONS), // connections which became Established (but may not longer be)
             pci,
             pipeline_id,
             tcp_port_base,
@@ -171,7 +169,6 @@ impl ConnectionManagerC {
     fn get_mut_con(&mut self, p: &u16) -> &mut Connection {
         &mut self.port2con[(p - self.tcp_port_base) as usize]
     }
-
 
     // create a new connection, if out of resources return None
     pub fn create(&mut self, role: TcpRole) -> Option<&mut Connection> {
@@ -226,7 +223,6 @@ impl ConnectionManagerC {
         }
     }
 
-
     //TODO allow for more precise time out conditions, currently whole TCP connections are timed out, also we should send a RST
     pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<u16>) {
         loop {
@@ -260,7 +256,6 @@ impl ConnectionManagerC {
         self.release_port(port);
     }
 
-
     pub fn release_port(&mut self, port: u16) {
         let c = &mut self.port2con[(port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
@@ -269,7 +264,7 @@ impl ConnectionManagerC {
             self.free_ports.push_back(port);
             assert_eq!(port, c.port());
             c.set_port(0u16); // this indicates an unused connection,
-            // we keep unused connection in port2con table
+                              // we keep unused connection in port2con table
         }
     }
 
@@ -286,7 +281,10 @@ impl ConnectionManagerC {
     #[allow(dead_code)]
     pub fn dump_records(&mut self) {
         info!("{}: {:6} closed connections", self.pipeline_id, self.c_record_store.len());
-        self.c_record_store.iter().enumerate().for_each(|(i,  c)| debug!("{:6}: {}", i, c));
+        self.c_record_store
+            .iter()
+            .enumerate()
+            .for_each(|(i, c)| debug!("{:6}: {}", i, c));
         info!(
             "{}: {:6} open connections",
             self.pipeline_id,
@@ -309,7 +307,9 @@ impl ConnectionManagerC {
     }
 
     #[inline]
-    pub fn ready_connections(&self) -> usize { self.ready.len() }
+    pub fn ready_connections(&self) -> usize {
+        self.ready.len()
+    }
 
     pub fn get_ready_connection(&mut self) -> Option<&mut Connection> {
         let mut port_result = None;
@@ -340,7 +340,6 @@ impl ConnectionManagerC {
     }
 }
 
-
 pub struct ConnectionManagerS {
     c_record_store: Vec<ConRecord>,
     sock2index: HashMap<SocketAddrV4, usize>,
@@ -348,12 +347,11 @@ pub struct ConnectionManagerS {
     free_slots: VecDeque<usize>,
 }
 
-
 impl ConnectionManagerS {
     pub fn new() -> ConnectionManagerS {
-        let mut store=Vec::with_capacity(MAX_CONNECTIONS);
+        let mut store = Vec::with_capacity(MAX_CONNECTIONS);
         store.push(ConRecord::new());
-        store.pop();    // warming the Vec up! obviously when storing the first element in a Vec expensive initialization code runs
+        store.pop(); // warming the Vec up! obviously when storing the first element in a Vec expensive initialization code runs
         ConnectionManagerS {
             c_record_store: store,
             sock2index: HashMap::with_capacity(MAX_CONNECTIONS),
@@ -362,11 +360,14 @@ impl ConnectionManagerS {
         }
     }
 
-
     pub fn get_mut(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
         trace!("get_mut");
         let index = self.sock2index.get(sock);
-        if index.is_some() { Some(&mut self.connections[*index.unwrap()]) } else { None }
+        if index.is_some() {
+            Some(&mut self.connections[*index.unwrap()])
+        } else {
+            None
+        }
     }
 
     pub fn get_mut_or_create(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
@@ -389,17 +390,18 @@ impl ConnectionManagerS {
         }
     }
 
-
     pub fn release_sock(&mut self, sock: &SocketAddrV4) -> u64 {
         trace!("release_sock");
         // only if it is in use, i.e. it has been not released already
         let index = self.sock2index.remove(sock);
-        let mut ts=0;
+        let mut ts = 0;
         if index.is_some() {
             let mut c = self.connections[index.unwrap()].clone();
-            if c.get_uuid().is_none() { c.make_uuid(); }
+            if c.get_uuid().is_none() {
+                c.make_uuid();
+            }
             self.c_record_store.push(c.con_rec.clone());
-            ts=utils::rdtsc_unsafe();
+            ts = utils::rdtsc_unsafe();
             self.free_slots.push_back(index.unwrap());
         }
         ts
@@ -439,18 +441,18 @@ impl ConnectionManagerS {
         self.release_sock(sock);
     }
 
-
     // pushes all uncompleted connections to the connection record store
     pub fn record_uncompleted(&mut self) {
         let c_records = &mut self.c_record_store;
         let connections = &self.connections;
         self.sock2index.values().for_each(|i| {
             let mut c = connections[*i].clone();
-            if c.get_uuid().is_none() { c.make_uuid(); }
+            if c.get_uuid().is_none() {
+                c.make_uuid();
+            }
             c_records.push(c.con_rec.clone());
         });
     }
-
 
     pub fn fetch_c_records(&mut self) -> Vec<ConRecord> {
         mem::replace(&mut self.c_record_store, Vec::with_capacity(MAX_CONNECTIONS)) // we are "moving" the con_records out, and replace it with a new one
