@@ -390,21 +390,18 @@ impl ConnectionManagerS {
         }
     }
 
-    pub fn release_sock(&mut self, sock: &SocketAddrV4) -> u64 {
+    pub fn release_sock(&mut self, sock: &SocketAddrV4) {
         trace!("release_sock");
         // only if it is in use, i.e. it has been not released already
         let index = self.sock2index.remove(sock);
-        let mut ts = 0;
         if index.is_some() {
             let mut c = self.connections[index.unwrap()].clone();
             if c.get_uuid().is_none() {
                 c.make_uuid();
             }
             self.c_record_store.push(c.con_rec.clone());
-            ts = utils::rdtsc_unsafe();
             self.free_slots.push_back(index.unwrap());
         }
-        ts
     }
 
     //TODO allow for more precise time out conditions, currently whole TCP connections are timed out, also we should send a RST
