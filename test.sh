@@ -23,6 +23,12 @@ case $TASK in
         echo $executable
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;
+    macswap)
+        export RUST_LOG="traffic_lib=info,macswap=info,e2d2=info,netfcts=info", RUST_BACKTRACE=1
+        executable=`cargo test $2 --no-run --message-format=json --test macswap | jq -r 'select((.profile.test == true) and (.target.name == "macswap")) | .filenames[]'`
+        echo $executable
+        sudo -E env "PATH=$PATH" $executable --nocapture
+        ;;
 
     all)
         ./test.sh test_as_client $2
