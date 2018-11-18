@@ -1,0 +1,22 @@
+[netbricks]
+name        = "TcpGenerator"
+master_core = 0
+pool_size   = 2048              # default 2048
+cache_size  = 32                # default 32
+cores       = [ 1 ]
+ports       = [ 
+                    { name="7:00.0", rxd= 1024, txd= 1024, cores = [1], fdir = { pballoc="RteFdirPballoc256k", mode="RteFdirModePerfect", ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFF"}, src_port_mask="0", dst_port_mask="C000"} } ,
+                    { name="kni:1", rxd=64, txd=64, cores = [0], k_cores = [0] }
+              ] 
+vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
+
+[trafficengine]
+
+engine      = { namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24", port=20001, timeouts= { established= 10000 }, cps_limit=160000  }
+
+targets      = [ { id = "tcpgen_0", ip = "192.168.222.2", mac="3c:fd:fe:9e:ce:4c" , port = 65535 },
+#                 { id = "tcpgen_1", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc" , port = 49151 },
+#                 { id = "tcpgen_2", ip = "192.168.222.2", mac="a0:36:9f:82:9c:fc" , port = 32767 },
+              ]
+
+test_size   = 30000

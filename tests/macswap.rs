@@ -34,10 +34,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
+use std::fs::File;
+use std::str::FromStr;
 
 use uuid::Uuid;
-
-
+use std::io::Read;
 
 
 pub fn nf_macswap<T: 'static + Batch<Header = NullHeader>>(
@@ -77,7 +78,13 @@ pub fn macswap() {
     env_logger::init();
     info!("Starting MacSwap ..");
 
-    let config_file = "tests/test_gen.toml";
+    // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
+    let mut f = File::open("./tests/toml_file.txt").expect("file not found");
+    let mut toml_file = String::new();
+    f.read_to_string(&mut toml_file)
+        .expect("something went wrong reading toml_file.txt");
+
+    let toml_file = "tests/test_gen.toml";
 
     let log_level_rte = if log_enabled!(log::Level::Debug) {
         RteLogLevel::RteLogDebug
@@ -91,7 +98,7 @@ pub fn macswap() {
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
 
-    let configuration = read_config(&config_file).unwrap();
+    let configuration = read_config(&toml_file).unwrap();
 
     fn am_root() -> bool {
         match env::var("USER") {
@@ -117,7 +124,7 @@ pub fn macswap() {
 
     let opts = basic_opts();
 
-    let args: Vec<String> = vec!["trafficengine", "-f", &config_file]
+    let args: Vec<String> = vec!["trafficengine", "-f", &toml_file]
         .iter()
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
