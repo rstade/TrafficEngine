@@ -84,8 +84,6 @@ pub fn macswap() {
     f.read_to_string(&mut toml_file)
         .expect("something went wrong reading toml_file.txt");
 
-    let toml_file = "tests/test_gen.toml";
-
     let log_level_rte = if log_enabled!(log::Level::Debug) {
         RteLogLevel::RteLogDebug
     } else {
