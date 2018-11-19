@@ -96,7 +96,7 @@ pub fn macswap() {
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
 
-    let configuration = read_config(&toml_file).unwrap();
+    let configuration = read_config(&toml_file.trim()).unwrap();
 
     fn am_root() -> bool {
         match env::var("USER") {
@@ -122,7 +122,7 @@ pub fn macswap() {
 
     let opts = basic_opts();
 
-    let args: Vec<String> = vec!["trafficengine", "-f", &toml_file]
+    let args: Vec<String> = vec!["trafficengine", "-f", &toml_file.trim()]
         .iter()
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
@@ -177,7 +177,7 @@ pub fn macswap() {
             thread::sleep(Duration::from_millis(1000 as u64));
 
             //main loop
-            println!("press ctrl-c to terminate proxy ...");
+            println!("press ctrl-c to terminate MacSwap ...");
             while running.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
             }

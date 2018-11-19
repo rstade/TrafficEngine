@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 use serde_json;
+use bincode::{serialize, deserialize};
 use separator::Separatable;
 
 use netfcts::tcp_common::{TcpState, TcpStatistics, TcpCounter, TcpRole, CData, L234Data, ReleaseCause};
@@ -562,13 +563,11 @@ pub fn setup_generator(
                         strip_payload(p, c, hs);
                     }
                     update_tcp_checksum(p, hs.ip.payload_size(0), hs.ip.src(), hs.ip.dst());
+                    counter[TcpStatistics::SentFinAck2]+=1;
                     tcp_closed
                 };
 
-
                 let timestamp_entry = utils::rdtsc_unsafe();
-                let mut timestamp_1: u64 = timestamp_entry;
-                let mut timestamp_2: u64 = timestamp_entry;
 
                 let mut group_index = 0usize; // the index of the group to be returned, default 0: dump packet
                 assert!(p.get_pre_header().is_some()); // we must have parsed the headers
@@ -622,6 +621,12 @@ pub fn setup_generator(
                         } else {
                             if syn_injector_runs() {
                                 syn_injector_stop();
+                                tx_clone
+                                    .send(MessageFrom::Counter(
+                                        pipeline_id_clone.clone(),
+                                        counter_to.clone(),
+                                        counter_from.clone(),
+                                    )).unwrap();
                             }
                         }
                     }
@@ -632,12 +637,14 @@ pub fn setup_generator(
                         if let Some(c) = cm_c.get_ready_connection() {
                             cdata.client_port = c.port();
                             cdata.uuid = *c.get_uuid();
-                            let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
-                            make_payload_packet(p, c, &mut hs, &me, &servers, &pipeline_id_clone, json_string.as_bytes());
+                            //let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
+                            let bin_vec= serialize(&cdata).unwrap();
+                            //make_payload_packet(p, c, &mut hs, &me, &servers, &pipeline_id_clone, json_string.as_bytes());
+                            make_payload_packet(p, c, &mut hs, &me, &servers, &pipeline_id_clone, &bin_vec);
                             trace!(
-                                "{}: sending payload packet with payload '{}' on port {}",
+                                "{}: sending payload packet with payload '' on port {}",
                                 thread_id_2,
-                                json_string,
+                                //json_string,
                                 c.port(),
                             );
                             counter_to[TcpStatistics::Payload] += 1;
@@ -772,7 +779,8 @@ pub fn setup_generator(
                                     if hs.tcp_payload_len() > 0 {
                                         if c.con_rec.payload_packets == 0 {
                                             //first payload packet
-                                            match serde_json::from_slice::<CData>(p.get_payload()) {
+                                            //match serde_json::from_slice::<CData>(p.get_payload()) {
+                                            match deserialize::<CData>(p.get_payload()) {
                                                 Ok(cdata) => {
                                                     c.set_port(cdata.client_port);
                                                     let uuid = cdata.uuid;
@@ -788,6 +796,7 @@ pub fn setup_generator(
                                             }
                                             if old_s_state == TcpState::Established {
                                                 s_reply_with_fin(p, &mut c, &mut hs);
+                                                counter_from[TcpStatistics::SentFin]+=1;
                                                 c.con_rec.released(ReleaseCause::ActiveClose);
                                                 c.con_rec.push_state(TcpState::FinWait1);
                                             }

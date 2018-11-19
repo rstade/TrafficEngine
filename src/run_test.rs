@@ -1,6 +1,7 @@
 extern crate ctrlc;
 extern crate e2d2;
 extern crate ipnet;
+extern crate bincode;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -205,8 +206,8 @@ pub fn run_test(test_type: TestType) {
                                 let nr_bytes = stream
                                     .read(&mut buffer[..])
                                     .expect(&format!("cannot read from stream {}", stream.peer_addr().unwrap()));
-                                let cdata: CData =
-                                    serde_json::from_slice(&buffer[0..nr_bytes]).expect("cannot deserialize CData");
+                                let cdata: CData = bincode::deserialize(&buffer[0..nr_bytes]).expect("cannot deserialize cdata");
+                                //serde_json::from_slice(&buffer[0..nr_bytes]).expect("cannot deserialize CData");
                                 //let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&buffer).expect("cannot deserialize SocketAddrV4"));
                                 debug!("{} received {:?} from: {}", id, cdata, stream.peer_addr().unwrap())
                             }
@@ -251,9 +252,10 @@ pub fn run_test(test_type: TestType) {
                                 0xFFFF,
                                 Some(Uuid::new_v4()),
                             );
-                            let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
-                            stream.write(json_string.as_bytes()).expect("cannot write to stream");
-
+                            //let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
+                            //stream.write(json_string.as_bytes()).expect("cannot write to stream");
+                            let bin_vec= bincode::serialize(&cdata).expect("cannot serialize cdata");
+                            stream.write(&bin_vec).expect("cannot write to stream");
                             match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
                                 Ok(_) => {
                                     debug!("successfully send {} stars", ntry);

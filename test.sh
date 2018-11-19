@@ -27,13 +27,6 @@ case $TASK in
         export RUST_LOG="traffic_lib=info,macswap=info,e2d2=info,netfcts=info", RUST_BACKTRACE=1
         executable=`cargo test $2 --no-run --message-format=json --test macswap | jq -r 'select((.profile.test == true) and (.target.name == "macswap")) | .filenames[]'`
         echo $executable
-        echo ./tests/test_gen.toml > tests/toml_file.txt
-        sudo -E env "PATH=$PATH" $executable --nocapture
-        ;;
-    macswap2)
-        export RUST_LOG="traffic_lib=info,macswap=info,e2d2=info,netfcts=info", RUST_BACKTRACE=1
-        executable=`cargo test $2 --no-run --message-format=json --test macswap | jq -r 'select((.profile.test == true) and (.target.name == "macswap")) | .filenames[]'`
-        echo $executable
         echo ./tests/macswap.2.toml > tests/toml_file.txt
         sudo -E env "PATH=$PATH" $executable --nocapture
         ;;

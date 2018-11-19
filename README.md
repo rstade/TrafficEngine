@@ -1,13 +1,14 @@
 _**TrafficEngine Overview**_
 
 TrafficEngine is a stateful user-space TCP traffic generator written in Rust with following properties
-* high performance: some hundred thousand TCP connections per second (cps) per core). For comparison, modern web servers support some ten thousand cps per core, e.g. https://www.nginx.com/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers/
+* high performance: some hundred thousand TCP connections per second (cps) per core. For comparison, modern web servers support some ten thousand cps per core, e.g. https://www.nginx.com/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers/
+* supports client and server TCP roles concurrently
 * multi-core, shared nothing, locking-free architecture 
-* server side receive flow steering (RFS) by NIC
+* receive flow steering (RFS) by NIC
 
 It may be used for (load-)testing  TCP based application servers and TCP proxies. TrafficEngine maintains TCP-state and can therefore setup and release complete TCP connections.
 
-Scaling happens by steering the incoming server side TCP connections based on the TCP port to the appropriate core which handles the connection.  Therefore port resources are assigned to cores (based on paramater _dst_port_mask_ in the configuration file).    
+Multi-core scaling is supported by steering packets of the same TCP connection based on the TCP port or the IP address to the appropriate core which handles that connection.  Therefore port resources can be assigned to cores (based on paramater _dst_port_mask_ in the configuration file). Alternatively, if the NIC does not support port masks, steering can be based on the IP address.   
 
 TrafficEngine builds on [Netbricks](https://github.com/NetSys/NetBricks) which itself utilizes DPDK for user-space networking. Starting with version 0.2.0 more generic code is moved to an application independent crate _netfcts_ (in sub-directory netfcts).
 
@@ -23,10 +24,39 @@ First a network interface for user-space DPDK is needed. This interface is used 
 
 Secondly an extra Linux interface is required which is used by the test modules for placing server stacks.
 
-For integration testing both interfaces must be interconnected. In case of virtual interfaces, e.g. interfaces may be connected to a host-only network of the hypervisor. Using Wireshark on this network allows us to observe the traffic exchange between clients, the proxy and the servers. However, as wireshark may not keep up with the transmission speeds of modern line cards, packets may be lost. In case of physical interfaces, interfaces my be connected by a cross over cable.
+For some integration tests both interfaces must be interconnected. In case of physical interfaces, interfaces my be connected by a cross over cable. In case of virtual interfaces, e.g. interfaces may be connected to a host-only network of the hypervisor. Using Wireshark on the linux interface allows us to observe the traffic exchange between clients, the TrafficEngine and the servers. However, as wireshark may not keep up with the transmission speeds of modern line cards, packets may be lost. 
 
 In addition some parameters like the Linux interface name (linux_if) and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
 
 Latest code of TrafficEngine is tested on a 2-socket NUMA server, each socket hosting 4 physical cores, running Centos 7.5.
+
+**_Testing_**
+
+The executables must currently be run with supervisor rights, as otherwise the DPDK cannot be initialized. However to avoid that Cargo itself must be run under root, the shell script [test.sh](https://github.com/rstade/TrafficEngine/blob/master/test.sh) can be used, for example 
+
+"./test.sh test_as_client  --release"  or  "./test.sh test_as_server  --release". 
+
+The script requires installation of the _jq_ tool, e.g.  by running "yum install jq". 
+
+There is another test executable _macswap_ which can be created and executed by calling "./test.sh macswap --release". This executable swaps source and destination MAC address of all incoming Ethernet frames and sends them back towards the origin. By using this MacSwap tool TrafficEngine can connect to itself, e.g. for doing performance tests. Ideally the MacSwap tool is run for this purpose on a second server. 
+
+**_Performance_**
+
+Our test scenario is as follows:
+
+* We connect client-side to server-side of TrafficEngine using MacSwap on a second server which is directly interconnected via a 10G link.
+* After the client has setup the TCP connection setup, it sends a small payload packet to the server. After receiving the payload the server side release the TCP connection. In total we exchange seven packets per connection. 
+* The same TrafficEngine instance operates concurrently as client and as server. Therefore when comparing our cps figures with the cps of a TCP server our figures need to be approximately doubled. 
+* Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache.
+* Test runs setup and release 48000 connections.
+
+The following figures shows first results for the achieved connections per second in dependence of the used cores.
+
+![TrafficEngine performance](https://github.com/rstade/trafficengine/blob/master/cps_vs_cores.png)
+
+
+
+
+
 
 
