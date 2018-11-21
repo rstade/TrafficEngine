@@ -46,7 +46,7 @@ Our test scenario is as follows:
 * After the client has setup the TCP connection, it sends a small payload packet to the server. After receiving the payload the server side release the TCP connection. In total we exchange seven packets per connection. 
 * The same TrafficEngine instance operates concurrently as client and as server. Therefore when comparing our cps figures with the cps of a TCP server our figures can be approximately doubled. 
 * Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache and a recent Centos 7.5 real-time kernel, e.g. from repository:  http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. We also performed the basic tuning steps to isolate the cores which are running our working threads. The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel.
-* Test runs setup and release 48000 connections per pipeline.
+* Each test run sets up and releases 48000 connections per pipeline.
 
 The following figures shows first results for the achieved connections per second in dependence of the used cores.
 

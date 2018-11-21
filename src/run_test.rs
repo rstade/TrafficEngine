@@ -56,7 +56,12 @@ pub enum TestType {
 pub fn run_test(test_type: TestType) {
     env_logger::init();
 
-    let toml_file = "tests/test_gen.toml";
+    info!("Testing TrafficEngine in mode {:?} ..", test_type);
+    // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
+    let mut f = File::open("./tests/toml_file.txt").expect("file not found");
+    let mut toml_file = String::new();
+    f.read_to_string(&mut toml_file)
+        .expect("something went wrong reading ./tests/toml_file.txt");
 
     let log_level_rte = if log_enabled!(log::Level::Debug) {
         RteLogLevel::RteLogDebug
@@ -72,10 +77,10 @@ pub fn run_test(test_type: TestType) {
 
     let system_data = SystemData::detect();
 
-    let configuration = read_config(toml_file).unwrap();
+    let configuration = read_config(toml_file.trim()).unwrap();
 
     if configuration.test_size.is_none() {
-        error!("missing parameter 'test_size' in configuration file {}", toml_file);
+        error!("missing parameter 'test_size' in configuration file {}", toml_file.trim());
         process::exit(1);
     };
 
@@ -103,7 +108,7 @@ pub fn run_test(test_type: TestType) {
 
     let opts = basic_opts();
 
-    let args: Vec<String> = vec!["proxyengine", "-f", toml_file]
+    let args: Vec<String> = vec!["proxyengine", "-f", toml_file.trim()]
         .iter()
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
