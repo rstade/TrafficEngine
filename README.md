@@ -28,7 +28,7 @@ For some integration tests both interfaces must be interconnected. In case of ph
 
 In addition some parameters like the Linux interface name (linux_if) and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
 
-Latest code of TrafficEngine is tested on a 2-socket NUMA server, each socket hosting 4 physical cores, running Centos 7.5.
+Latest code of TrafficEngine is tested on a 2-socket NUMA server, each socket hosting 4 physical cores, running the real-time kernel of Centos 7.5.
 
 **_Testing_**
 
@@ -38,21 +38,23 @@ The executables must currently be run with supervisor rights, as otherwise the D
 
 The script requires installation of the _jq_ tool, e.g.  by running "yum install jq". 
 
-There is another test executable _macswap_ which can be created and executed by calling "./test.sh macswap --release". This executable swaps source and destination MAC address of all incoming Ethernet frames and sends them back towards the origin. By using this MacSwap tool TrafficEngine can connect to itself, e.g. for doing performance tests. Ideally the MacSwap tool is run for this purpose on a second server. 
-
 **_Performance_**
 
 Our test scenario is as follows:
 
-* We connect client-side to server-side of TrafficEngine using MacSwap on a second server which is directly interconnected via a 10G link.
-* After the client has setup the TCP connection setup, it sends a small payload packet to the server. After receiving the payload the server side release the TCP connection. In total we exchange seven packets per connection. 
-* The same TrafficEngine instance operates concurrently as client and as server. Therefore when comparing our cps figures with the cps of a TCP server our figures need to be approximately doubled. 
-* Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache.
-* Test runs setup and release 48000 connections.
+* We connect client- with server-side of TrafficEngine by using the loopback feature of the NIC (see [loopback_run.toml](https://github.com/rstade/TrafficEngine/blob/master/macswap_run.toml)). 
+* After the client has setup the TCP connection, it sends a small payload packet to the server. After receiving the payload the server side release the TCP connection. In total we exchange seven packets per connection. 
+* The same TrafficEngine instance operates concurrently as client and as server. Therefore when comparing our cps figures with the cps of a TCP server our figures can be approximately doubled. 
+* Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache and a recent Centos 7.5 real-time kernel, e.g. from repository:  http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. We also performed the basic tuning steps to isolate the cores which are running our working threads. The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel.
+* Test runs setup and release 48000 connections per pipeline.
 
 The following figures shows first results for the achieved connections per second in dependence of the used cores.
 
 ![TrafficEngine performance](https://github.com/rstade/trafficengine/blob/master/cps_vs_cores.png)
+
+**_Limitations_**
+
+Currently only a basic TCP state machine without retransmission, flow control, etc., is implemented.
 
 
 

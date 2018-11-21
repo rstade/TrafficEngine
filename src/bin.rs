@@ -351,7 +351,7 @@ pub fn main() {
             if min_total.get_first_stamp().is_some() && max_total.get_last_stamp().is_some() {
                 let total = max_total.get_last_stamp().unwrap() - min_total.get_first_stamp().unwrap();
                 info!(
-                    "total used cycles for all pipelines = {}, per connection = {} ({} cps)",
+                    "max used cycles over all pipelines = {}, per connection = {} ({} cps)",
                     total.separated_string(),
                     (total / (total_connections as u64)).separated_string(),
                     system_data.cpu_clock/(total / (total_connections as u64 + 1)),
