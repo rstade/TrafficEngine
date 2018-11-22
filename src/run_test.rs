@@ -28,7 +28,7 @@ use e2d2::allocators::CacheAligned;
 
 use ipnet::Ipv4Net;
 use env_logger;
-use serde_json;
+//use serde_json;
 use separator::Separatable;
 use netfcts::{initialize_flowdirector, FlowSteeringMode};
 use uuid::Uuid;

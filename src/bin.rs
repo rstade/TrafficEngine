@@ -255,7 +255,7 @@ pub fn main() {
             // a hash map of all server side records by uuid
             let mut by_uuid = HashMap::with_capacity(con_records_s[0].1.len()*con_records_s.len());
             let mut completed_count_s = 0;
-            for (p, c_records_server) in &mut con_records_s {
+            for (_p, c_records_server) in &mut con_records_s {
                 c_records_server.iter().enumerate().for_each(|(_i, c)| {
                     if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed
                         {

@@ -7,7 +7,7 @@ use std::mem;
 use e2d2::headers::MacHeader;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PacketRx, PortQueue, L4Flow};
-use e2d2::utils;
+//use e2d2::utils;
 
 use netfcts::timer_wheel::TimerWheel;
 use PipelineId;

@@ -35,7 +35,6 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
 use std::fs::File;
-use std::str::FromStr;
 
 use uuid::Uuid;
 use std::io::Read;
