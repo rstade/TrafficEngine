@@ -34,18 +34,24 @@ Latest code of TrafficEngine is tested on a 2-socket NUMA server, each socket ho
 
 The executables must currently be run with supervisor rights, as otherwise the DPDK cannot be initialized. However to avoid that Cargo itself must be run under root, the shell script [test.sh](https://github.com/rstade/TrafficEngine/blob/master/test.sh) can be used, for example 
 
-"./test.sh test_as_client  --release"  or  "./test.sh test_as_server  --release". 
+* "./test.sh test_as_client  --release"  or  "./test.sh test_as_server  --release". 
 
 The script requires installation of the _jq_ tool, e.g.  by running "yum install jq". 
+
+In addition the script allows to run a simple loopback helper tool, called macswap:
+* "./test.sh macswap --release"
+
+This tool can be used in cases the loopback mode of the NIC is not working. This happened with X710DA2. The tool should be run ideally on a second server. It swaps source and destination MAC addresses and sends the frames back towards the origin. 
+
 
 **_Performance_**
 
 Our test scenario is as follows:
 
-* We connect client- with server-side of TrafficEngine by using the loopback feature of the NIC (see [loopback_run.toml](https://github.com/rstade/TrafficEngine/blob/master/macswap_run.toml)). 
+* We connect client- with server-side of TrafficEngine by using the loopback feature of the NIC (see [loopback_run.toml](https://github.com/rstade/TrafficEngine/blob/master/loopback_run.toml)). For this we used a 82599 based NIC.
 * After the client has setup the TCP connection, it sends a small payload packet to the server. After receiving the payload the server side release the TCP connection. In total we exchange seven packets per connection. 
 * The same TrafficEngine instance operates concurrently as client and as server. Therefore when comparing our cps figures with the cps of a TCP server our figures can be approximately doubled. 
-* Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache and a recent Centos 7.5 real-time kernel, e.g. from repository:  http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. We also performed the basic tuning steps to isolate the cores which are running our working threads. The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel.
+* Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache and a recent Centos 7.5 real-time kernel, e.g. from repository:  http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. We also performed the basic tuning steps to isolate the cores which are running our working threads. The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md).
 * Each test run sets up and releases 48000 connections per pipeline.
 
 The following figures shows first results for the achieved connections per second in dependence of the used cores.
