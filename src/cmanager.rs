@@ -18,12 +18,12 @@ use netfcts::ConRecord;
 #[derive(Clone)]
 pub struct Connection {
     pub con_rec: ConRecord,
+    /// next client side sequence no towards DUT
     pub seqn_nxt: u32,
-    // next client side sequence no towards DUT
+    /// oldest unacknowledged sequence no
     pub seqn_una: u32,
-    // oldest unacknowledged sequence no
+    /// current ack no towards DUT (expected seqn)
     pub ackn_nxt: u32,
-    // current ack no towards DUT (expected seqn)
     pub dut_mac: MacHeader, // server side mac, i.e. mac of DUT
 }
 

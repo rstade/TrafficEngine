@@ -286,7 +286,6 @@ pub fn setup_generator(
                     mac: &'a mut MacHeader,
                     ip: &'a mut IpHeader,
                     tcp: &'a mut TcpHeader,
-                    //flow: Flow,
                 }
 
                 impl<'a> HeaderState<'a> {
