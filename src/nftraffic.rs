@@ -243,6 +243,7 @@ pub fn setup_generator(
     // group 0 -> dump packets
     // group 1 -> send to PCI
     // group 2 -> send to KNI
+    let rxq=pci.rxq();
     let uuid_l4groupby = Uuid::new_v4();
     let uuid_l4groupby_clone = uuid_l4groupby.clone();
     let mut time_adder=TimeAdder::new("cmanager", 10000);
@@ -717,6 +718,7 @@ pub fn setup_generator(
                                     if old_s_state == TcpState::Listen {
                                         // replies with a SYN-ACK to client:
                                         syn_received(p, c, &mut hs, &mut counter_from[TcpStatistics::RecvSyn]);
+                                        c.con_rec.server_index = rxq as usize;  // we misuse this field for the queue number
                                         wheel_s.schedule(
                                             &(timeouts.established.unwrap() * system_data.cpu_clock / 1000),
                                             *c.get_dut_sock().unwrap(),
@@ -813,9 +815,9 @@ pub fn setup_generator(
                             // client side
                             // check that flow steering worked:
                             if !cm_c.owns_tcp_port(hs.tcp.dst_port()) {
-                                error!("{}", hs.tcp)
+                                error!("flow steering failed {}", hs.tcp);
+                                assert!(cm_c.owns_tcp_port(hs.tcp.dst_port()));
                             }
-                            assert!(cm_c.owns_tcp_port(hs.tcp.dst_port()));
                             let mut c = cm_c.get_mut_by_port(hs.tcp.dst_port());
                             if c.is_some() {
                                 let mut c = c.as_mut().unwrap();

@@ -371,7 +371,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
         let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
         let mut start_tsc: HashMap<(PipelineId, &'static str), u64> = HashMap::new();
         let mut reply_to_main = None;
-
+/*
         let l234data: Vec<L234Data> = configuration
             .targets
             .iter()
@@ -385,7 +385,7 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                 server_id: srv_cfg.id.clone(),
                 index: i,
             }).collect();
-
+*/
         for _t in 0..TaskType::NoTaskTypes as usize {
             tasks.push(Vec::<(PipelineId, Uuid)>::with_capacity(16));
         }
@@ -456,12 +456,6 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                     println!("terminating TrafficEngine ...");
                     context.stop();
                     break;
-                }
-                Ok(MessageFrom::Established(pipe, con_record)) => {
-                    info!(
-                        "pipe {}: {} -> {} ",
-                        pipe, con_record, l234data[con_record.server_index].server_id,
-                    );
                 }
                 Ok(MessageFrom::Task(pipeline_id, uuid, task_type)) => {
                     debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);

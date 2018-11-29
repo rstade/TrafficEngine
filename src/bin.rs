@@ -282,7 +282,7 @@ pub fn main() {
                         if c_server.is_some() {
                             let c_server = c_server.unwrap();
                             let line = format!(
-                                "        ({:?}, sock={:21}, port={}, {:?}, {:?}, +{}, {:?})\n",
+                                "        ({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, +{}, {:?})\n",
                                 c_server.role,
                                 if c_server.sock.is_some() {
                                     c_server.sock.unwrap().to_string()
@@ -290,6 +290,7 @@ pub fn main() {
                                     "none".to_string()
                                 },
                                 c_server.port,
+                                c_server.server_index,
                                 c_server.states(),
                                 c_server.get_release_cause(),
                                 (c_server.get_first_stamp().unwrap() - c.get_first_stamp().unwrap()).separated_string(),

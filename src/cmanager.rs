@@ -176,10 +176,10 @@ impl ConnectionManagerC {
         if opt_port.is_some() {
             let port = opt_port.unwrap();
             {
+                let sock=SocketAddrV4::new(Ipv4Addr::from(self.ip), port);
                 let cc = self.get_mut_con(&port);
                 assert_eq!(cc.port(), 0);
-                cc.initialize(None, port, role);
-                //debug!("tcp flow created on port {:?}", port);
+                cc.initialize(Some(&sock), port, role);
             }
             Some(self.get_mut_con(&port))
         } else {
