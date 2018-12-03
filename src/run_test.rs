@@ -211,7 +211,8 @@ pub fn run_test(test_type: TestType) {
                                 let nr_bytes = stream
                                     .read(&mut buffer[..])
                                     .expect(&format!("cannot read from stream {}", stream.peer_addr().unwrap()));
-                                let cdata: CData = bincode::deserialize(&buffer[0..nr_bytes]).expect("cannot deserialize cdata");
+                                let cdata: CData =
+                                    bincode::deserialize(&buffer[0..nr_bytes]).expect("cannot deserialize cdata");
                                 //serde_json::from_slice(&buffer[0..nr_bytes]).expect("cannot deserialize CData");
                                 //let socket=Box::new(bincode::deserialize::<SocketAddrV4>(&buffer).expect("cannot deserialize SocketAddrV4"));
                                 debug!("{} received {:?} from: {}", id, cdata, stream.peer_addr().unwrap())
@@ -259,21 +260,21 @@ pub fn run_test(test_type: TestType) {
                             );
                             //let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
                             //stream.write(json_string.as_bytes()).expect("cannot write to stream");
-                            let bin_vec= bincode::serialize(&cdata).expect("cannot serialize cdata");
+                            let bin_vec = bincode::serialize(&cdata).expect("cannot serialize cdata");
                             stream.write(&bin_vec).expect("cannot write to stream");
                             match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
                                 Ok(_) => {
                                     debug!("successfully send {} stars", ntry);
                                     /* let mut buf = [0u8; 256];
-                                        match stream.read(&mut buf[..]) {
-                                            Ok(_) => {
-                                                info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap())
-                                            }
-                                            _ => {
-                                                panic!("timeout on connection {} while waiting for answer", ntry);
-                                            }
-                                        };
-                                        */
+                                            match stream.read(&mut buf[..]) {
+                                                Ok(_) => {
+                                                    info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap())
+                                                }
+                                                _ => {
+                                                    panic!("timeout on connection {} while waiting for answer", ntry);
+                                                }
+                                            };
+                                            */
                                 }
                                 _ => {
                                     panic!("error when writing to test connection {}", ntry);
@@ -306,9 +307,19 @@ pub fn run_test(test_type: TestType) {
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)) => {
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_packets)) => {
                         info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
                         info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
+                        if tx_packets.len() > 0 {
+                            info!("{}: tx packets over time", pipeline_id);
+                            info!("{:24}: {:8}", tx_packets[0].0.separated_string(), tx_packets[0].1);
+                        }
+                        if tx_packets.len() > 1 {
+                            tx_packets.iter().zip(&tx_packets[1..]).for_each(|(&prev, &next)| {
+                                info!("{:24}: {:8}", (next.0 - prev.0).separated_string(), (next.1 - prev.1))
+                            });
+                        }
+
                         tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                         tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }

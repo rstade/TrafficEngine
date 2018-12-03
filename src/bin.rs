@@ -180,14 +180,23 @@ pub fn main() {
 
             // start generator
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-            let mut pipeline_completed_count=0;
+            let mut pipeline_completed_count = 0;
 
             while pipeline_completed_count < cores.len() {
                 match reply_mrx.recv_timeout(Duration::from_millis(20000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)) => {
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_packets)) => {
                         info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
                         info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
-                        pipeline_completed_count+=1
+                        if tx_packets.len() > 0 {
+                            info!("{}: tx packets over time", pipeline_id);
+                            info!("      {:>24} -{:8}", tx_packets[0].0.separated_string(), tx_packets[0].1);
+                        }
+                        if tx_packets.len() > 1 {
+                            tx_packets.iter().zip(&tx_packets[1..]).enumerate().for_each(|(i,(&prev, &next))| {
+                                info!("{:4}: {:>24} -{:8}", i, (next.0 - prev.0).separated_string(), (next.1 - prev.1))
+                            });
+                        }
+                        pipeline_completed_count += 1
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                     Err(RecvTimeoutError::Timeout) => {
@@ -201,7 +210,7 @@ pub fn main() {
                 }
             }
 
-            thread::sleep(Duration::from_millis(1000 as u64));
+            thread::sleep(Duration::from_millis(200 as u64));
 
             mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
             thread::sleep(Duration::from_millis(100 as u64));
@@ -215,9 +224,18 @@ pub fn main() {
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)) => {
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_packets)) => {
                         info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
                         info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
+                        if tx_packets.len() > 0 {
+                            info!("{}: tx packets over time", pipeline_id);
+                            info!("      {:>24} -{:8}", tx_packets[0].0.separated_string(), tx_packets[0].1);
+                        }
+                        if tx_packets.len() > 1 {
+                            tx_packets.iter().zip(&tx_packets[1..]).enumerate().for_each(|(i,(&prev, &next))| {
+                                info!("{:4}: {:>24} -{:8}", i, (next.0 - prev.0).separated_string(), (next.1 - prev.1))
+                            });
+                        }
                         tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                         tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }
@@ -253,14 +271,14 @@ pub fn main() {
             }
 
             // a hash map of all server side records by uuid
-            let mut by_uuid = HashMap::with_capacity(con_records_s[0].1.len()*con_records_s.len());
+            let mut by_uuid = HashMap::with_capacity(con_records_s[0].1.len() * con_records_s.len());
             let mut completed_count_s = 0;
             for (_p, c_records_server) in &mut con_records_s {
                 c_records_server.iter().enumerate().for_each(|(_i, c)| {
                     if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed
-                        {
-                            completed_count_s += 1
-                        };
+                    {
+                        completed_count_s += 1
+                    };
                     by_uuid.insert(c.uuid.unwrap(), c);
                 });
             }
@@ -355,7 +373,7 @@ pub fn main() {
                     "max used cycles over all pipelines = {}, per connection = {} ({} cps)",
                     total.separated_string(),
                     (total / (total_connections as u64)).separated_string(),
-                    system_data.cpu_clock/(total / (total_connections as u64 + 1)),
+                    system_data.cpu_clock / (total / (total_connections as u64 + 1)),
                 );
             }
 

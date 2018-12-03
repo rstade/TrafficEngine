@@ -484,13 +484,13 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                         );
                     };
                 }
-                Ok(MessageFrom::Counter(pipeline_id, tcp_counter_to, tcp_counter_from)) => {
+                Ok(MessageFrom::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_counter)) => {
                     debug!("{}: received Counter", pipeline_id);
                     if reply_to_main.is_some() {
                         reply_to_main
                             .as_ref()
                             .unwrap()
-                            .send(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from))
+                            .send(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_counter))
                             .unwrap();
                     };
                 }

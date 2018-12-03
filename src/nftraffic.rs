@@ -182,6 +182,7 @@ pub fn setup_generator(
     let pipeline_id_clone = pipeline_id.clone();
     let mut counter_to = TcpCounter::new();
     let mut counter_from = TcpCounter::new();
+    let mut sent_packets =  Vec::with_capacity(1000);
 
     // we create SYN and Payload packets and merge them with the upstream coming from the pci i/f
     // the destination port of the created tcp packets is used as discriminator in the pipeline (dst_port 1 is for SYN packet generation)
@@ -196,7 +197,7 @@ pub fn setup_generator(
             0,
             system_data.cpu_clock / engine_config.cps_limit() * 32,
             1u16,
-        ),
+        ).set_start_delay(system_data.cpu_clock / 100),
     );
     tx.send(MessageFrom::Task(pipeline_id.clone(), injector_uuid, TaskType::TcpGenerator))
         .unwrap();
@@ -213,12 +214,11 @@ pub fn setup_generator(
             0,
             system_data.cpu_clock / engine_config.cps_limit() * 32,
             2u16,
-        ),
+        ).set_start_delay(system_data.cpu_clock / 100),
     );
     tx.send(MessageFrom::Task(pipeline_id.clone(), injector_uuid, TaskType::TcpGenerator))
         .unwrap();
     let payload_injector_ready_flag = sched.get_ready_flag(&injector_uuid).unwrap();
-
 
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
@@ -230,12 +230,11 @@ pub fn setup_generator(
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_task, TaskType::TickGenerator))
         .unwrap();
 
-
     let l2_input_stream = merge_auto(
         vec![
             syn_consumer.compose(),
             payload_consumer.compose(),
-            consumer_timerticks.compose(),
+            consumer_timerticks.set_urgent().compose(),
             l2groups.get_group(1).unwrap().compose(),
         ],
         SchedulingPolicy::LongestQueue,
@@ -244,7 +243,8 @@ pub fn setup_generator(
     // group 0 -> dump packets
     // group 1 -> send to PCI
     // group 2 -> send to KNI
-    let rxq=pci.rxq();
+    let rxq= pci.rxq();
+    let tx_stats = pci.tx_stats();
     let uuid_l4groupby = Uuid::new_v4();
     let uuid_l4groupby_clone = uuid_l4groupby.clone();
     let mut time_adder=TimeAdder::new("cmanager", 10000);
@@ -626,6 +626,7 @@ pub fn setup_generator(
                                         pipeline_id_clone.clone(),
                                         counter_to.clone(),
                                         counter_from.clone(),
+                                        sent_packets.clone(),
                                     )).unwrap();
                             }
                         }
@@ -667,6 +668,7 @@ pub fn setup_generator(
                                         pipeline_id_clone.clone(),
                                         counter_to.clone(),
                                         counter_from.clone(),
+                                        sent_packets.clone(),
                                     )).unwrap();
                             }
                             Ok(MessageTo::FetchCRecords) => {
@@ -686,6 +688,7 @@ pub fn setup_generator(
                             cm_c.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_c);
                             cm_s.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_s);
                         }
+                        sent_packets.push((utils::rdtsc_unsafe(), tx_stats.stats.load(Ordering::Relaxed)) );
                     }
                     _ => {
                         if hs.tcp.dst_port() == cm_c.special_port() {
