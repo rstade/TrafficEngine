@@ -174,6 +174,7 @@ pub fn setup_generator(
             }
         },
         sched,
+        "L2-Groups".to_string(),
         uuid_l2groupby_clone,
     );
 
@@ -455,7 +456,6 @@ pub fn setup_generator(
                     if *syn_counter % 1000 == 0 {
                         debug!("{}: sent {} SYNs", pipeline_id, *syn_counter);
                     }
-                    //debug!("SYN packet to server - L3: {}, L4: {}", h.ip, p.get_header());
                 }
 
                 #[inline]
@@ -935,6 +935,7 @@ pub fn setup_generator(
                 group_index
             },
             sched,
+            "L4-Groups".to_string(),
             uuid_l4groupby_clone,
         );
 
