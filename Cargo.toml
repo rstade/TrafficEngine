@@ -13,7 +13,7 @@ path = "src/bin.rs"
 
 
 [dependencies]
-e2d2 = { version = "=0.3.6", path = "../../work/NetBricks/framework", features = ["performance"] }
+e2d2 = { version = "=0.4.0", path = "../../work/NetBricks/framework", features = ["performance"] }
 netfcts={ version="0.1.2", path = "../netfcts" }
 rand = "0.3"
 fnv = "*"
@@ -21,12 +21,11 @@ log = ">=0.4"
 env_logger = ">=0.5"
 ctrlc = { version = ">=3.1", features = ["termination"] }
 time = ">=0.1.0"
-toml = "0.4"
+toml = ">=0.4"
 separator =  ">= 0.3"
 serde = "1.0"
 serde_derive = ">=1.0"
-eui48 = { version= "0.3", features=["serde"] }
-error-chain = ">=0.12"
+eui48 = { version= ">=0.3", features=["serde"] }
 uuid = { version = ">=0.7", features = ["v4", "serde"] }
 bincode = "*"
 serde_json = "*"

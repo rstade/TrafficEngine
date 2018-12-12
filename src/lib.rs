@@ -20,12 +20,8 @@ extern crate serde_json;
 extern crate netfcts;
 extern crate ipnet;
 
-#[macro_use]
-extern crate error_chain;
-
 pub mod nftraffic;
 pub mod run_test;
-pub mod errors;
 mod cmanager;
 
 pub use netfcts::tcp_common::{CData, L234Data, ReleaseCause, UserData, TcpRole, TcpState, TcpCounter, TcpStatistics};
@@ -35,29 +31,25 @@ use eui48::MacAddress;
 use uuid::Uuid;
 use separator::Separatable;
 
-use e2d2::native::zcsi::*;
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::PortQueue;
 use e2d2::interface::*;
 
-use errors::*;
+use netfcts::errors::*;
 use nftraffic::*;
 use netfcts::tasks::*;
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
 use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
+use netfcts::io::print_hard_statistics;
 use ipnet::Ipv4Net;
 
 use std::fs::File;
 use std::io::Read;
-use std::any::Any;
 use std::net::Ipv4Addr;
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::Path;
-use std::ptr;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -165,131 +157,6 @@ pub fn read_config(filename: &str) -> Result<Configuration> {
         },
         Err(e) => Err(e.into()),
     }
-}
-
-struct MyData {
-    c2s_count: usize,
-    s2c_count: usize,
-    avg_latency: f64,
-}
-
-impl MyData {
-    fn new() -> MyData {
-        MyData {
-            c2s_count: 0,
-            s2c_count: 0,
-            avg_latency: 0.0f64,
-        }
-    }
-
-    fn init(&mut self) {
-        self.c2s_count = 0;
-        self.s2c_count = 0;
-        self.avg_latency = 0.0f64;
-    }
-}
-
-// using the container makes compiler happy wrt. to static lifetime for the mydata content
-pub struct Container {
-    mydata: MyData,
-}
-
-impl UserData for Container {
-    #[inline]
-    fn ref_userdata(&self) -> &Any {
-        &self.mydata
-    }
-
-    fn mut_userdata(&mut self) -> &mut Any {
-        &mut self.mydata
-    }
-
-    fn init(&mut self) {
-        self.mydata.init();
-    }
-}
-
-impl Container {
-    pub fn new() -> Box<Container> {
-        Box::new(Container { mydata: MyData::new() })
-    }
-}
-
-pub fn get_mac_from_ifname(ifname: &str) -> Result<MacAddress> {
-    let iface = Path::new("/sys/class/net").join(ifname).join("address");
-    let mut macaddr = String::new();
-    fs::File::open(iface).map_err(|e| e.into()).and_then(|mut f| {
-        f.read_to_string(&mut macaddr)
-            .map_err(|e| e.into())
-            .and_then(|_| MacAddress::parse_str(&macaddr.lines().next().unwrap_or("")).map_err(|e| e.into()))
-    })
-}
-
-pub fn get_mac_string_from_ifname(ifname: &str) -> Result<String> {
-    let iface = Path::new("/sys/class/net").join(ifname).join("address");
-    let mut macaddr = String::new();
-    fs::File::open(iface).map_err(|e| e.into()).and_then(|mut f| {
-        f.read_to_string(&mut macaddr)
-            .map_err(|e| e.into())
-            .and_then(|_| Ok(macaddr.lines().next().unwrap_or("").to_string()))
-    })
-}
-
-pub fn print_hard_statistics(port_id: u16) -> i32 {
-    let stats = RteEthStats::new();
-    let retval;
-    unsafe {
-        retval = rte_eth_stats_get(port_id, &stats as *const RteEthStats);
-    }
-    if retval == 0 {
-        println!("Port {}:\n{}\n", port_id, stats);
-    }
-    retval
-}
-
-pub fn print_soft_statistics(port_id: u16) -> i32 {
-    let stats = RteEthStats::new();
-    let retval;
-    unsafe {
-        retval = rte_eth_stats_get(port_id, &stats as *const RteEthStats);
-    }
-    if retval == 0 {
-        println!("Port {}:\n{}\n", port_id, stats);
-    }
-    retval
-}
-
-pub fn print_xstatistics(port_id: u16) -> i32 {
-    let len;
-    unsafe {
-        len = rte_eth_xstats_get_names_by_id(port_id, ptr::null(), 0, ptr::null());
-        if len < 0 {
-            return len;
-        }
-        let xstats_names = vec![
-            RteEthXstatName {
-                name: [0; RTE_ETH_XSTATS_NAME_SIZE],
-            };
-            len as usize
-        ];
-        let ids = vec![0u64; len as usize];
-        if len != rte_eth_xstats_get_names_by_id(port_id, xstats_names.as_ptr(), len as u32, ptr::null()) {
-            return -1;
-        };
-        let values = vec![0u64; len as usize];
-
-        if len != rte_eth_xstats_get_by_id(port_id, ptr::null(), values.as_ptr(), 0 as u32) {
-            return -1;
-        }
-
-        for i in 0..len as usize {
-            rte_eth_xstats_get_id_by_name(port_id, xstats_names[i].to_ptr(), &ids[i]);
-            {
-                println!("{}, {}: {}", i, xstats_names[i].to_str().unwrap(), values[i]);
-            }
-        }
-    }
-    len
 }
 
 pub fn setup_pipelines(

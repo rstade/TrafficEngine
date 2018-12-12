@@ -22,9 +22,10 @@ use e2d2::allocators::CacheAligned;
 use e2d2::operators::{ReceiveBatch, Batch, TransformBatch, ParsedBatch};
 
 use netfcts::comm::{MessageFrom, MessageTo};
+use netfcts::errors::*;
 
 use traffic_lib::{read_config,};
-use traffic_lib::errors::*;
+
 use traffic_lib::spawn_recv_thread;
 
 use std::collections::{HashSet};

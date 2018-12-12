@@ -34,12 +34,13 @@ use netfcts::{initialize_flowdirector, FlowSteeringMode};
 use uuid::Uuid;
 
 use read_config;
-use get_mac_from_ifname;
+use netfcts::system::get_mac_from_ifname;
+use netfcts::io::print_counters;
 use setup_pipelines;
 use {CData, L234Data};
 use {MessageFrom, MessageTo};
 use spawn_recv_thread;
-use errors::*;
+use netfcts::errors::*;
 use log;
 use ReleaseCause;
 use {TcpState, TcpStatistics};
@@ -307,19 +308,8 @@ pub fn run_test(test_type: TestType) {
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_packets)) => {
-                        info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
-                        info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
-                        if tx_packets.len() > 0 {
-                            info!("{}: tx packets over time", pipeline_id);
-                            info!("{:24}: {:8}", tx_packets[0].0.separated_string(), tx_packets[0].1);
-                        }
-                        if tx_packets.len() > 1 {
-                            tx_packets.iter().zip(&tx_packets[1..]).for_each(|(&prev, &next)| {
-                                info!("{:24}: {:8}", (next.0 - prev.0).separated_string(), (next.1 - prev.1))
-                            });
-                        }
-
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, rx_tx_stats)) => {
+                        print_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from, &rx_tx_stats);
                         tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                         tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }

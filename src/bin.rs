@@ -18,11 +18,14 @@ use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 
 use netfcts::initialize_flowdirector;
-use netfcts::comm::{MessageFrom, MessageTo};
+use netfcts::comm::{MessageFrom, MessageTo, };
 use netfcts::system::SystemData;
+use netfcts::system::get_mac_from_ifname;
+use netfcts::io::print_counters;
+use netfcts::errors::*;
 
-use traffic_lib::{get_mac_from_ifname, read_config, setup_pipelines};
-use traffic_lib::errors::*;
+use traffic_lib::{read_config, setup_pipelines};
+
 use traffic_lib::L234Data;
 use traffic_lib::spawn_recv_thread;
 use traffic_lib::ReleaseCause;
@@ -178,24 +181,14 @@ pub fn main() {
             // give threads some time to do initialization work
             thread::sleep(Duration::from_millis(1000 as u64));
 
+
             // start generator
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
             let mut pipeline_completed_count = 0;
-
             while pipeline_completed_count < cores.len() {
                 match reply_mrx.recv_timeout(Duration::from_millis(20000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_packets)) => {
-                        info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
-                        info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
-                        if tx_packets.len() > 0 {
-                            info!("{}: tx packets over time", pipeline_id);
-                            info!("      {:>24} -{:8}", tx_packets[0].0.separated_string(), tx_packets[0].1);
-                        }
-                        if tx_packets.len() > 1 {
-                            tx_packets.iter().zip(&tx_packets[1..]).enumerate().for_each(|(i,(&prev, &next))| {
-                                info!("{:4}: {:>24} -{:8}", i, (next.0 - prev.0).separated_string(), (next.1 - prev.1))
-                            });
-                        }
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, rx_tx_stats)) => {
+                        print_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from, &rx_tx_stats);
                         pipeline_completed_count += 1
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
@@ -224,18 +217,8 @@ pub fn main() {
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_packets)) => {
-                        info!("{}: to DUT {}", pipeline_id, tcp_counter_to);
-                        info!("{}: from DUT {}", pipeline_id, tcp_counter_from);
-                        if tx_packets.len() > 0 {
-                            info!("{}: tx packets over time", pipeline_id);
-                            info!("      {:>24} -{:8}", tx_packets[0].0.separated_string(), tx_packets[0].1);
-                        }
-                        if tx_packets.len() > 1 {
-                            tx_packets.iter().zip(&tx_packets[1..]).enumerate().for_each(|(i,(&prev, &next))| {
-                                info!("{:4}: {:>24} -{:8}", i, (next.0 - prev.0).separated_string(), (next.1 - prev.1))
-                            });
-                        }
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, rx_tx_stats)) => {
+                        print_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from, &rx_tx_stats);
                         tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                         tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }
