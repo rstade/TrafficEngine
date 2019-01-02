@@ -1,3 +1,3 @@
 #!/bin/bash
 
-cargo test $1 --no-run
+cargo test $* --no-run

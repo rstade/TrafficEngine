@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 use read_config;
 use netfcts::system::get_mac_from_ifname;
-use netfcts::io::print_counters;
+use netfcts::io::{ print_tcp_counters, print_rx_tx_counters};
 use setup_pipelines;
 use {CData, L234Data};
 use {MessageFrom, MessageTo};
@@ -309,7 +309,8 @@ pub fn run_test(test_type: TestType) {
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
                     Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, rx_tx_stats)) => {
-                        print_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from, &rx_tx_stats);
+                        print_tcp_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from);
+                        print_rx_tx_counters(&pipeline_id, &rx_tx_stats);
                         tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                         tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }
@@ -333,6 +334,7 @@ pub fn run_test(test_type: TestType) {
             };
             let mut f = BufWriter::new(file);
 
+            assert_ne!(con_records.len(), 0);
             if test_type == TestType::Server {
                 for (p, (_, c_records)) in &con_records {
                     debug!("Pipeline {}:", p);
@@ -388,6 +390,7 @@ pub fn run_test(test_type: TestType) {
                     }
                 }
             }
+
             if test_type == TestType::Client {
                 for (p, (c_records, _)) in &con_records {
                     let mut completed_count = 0;

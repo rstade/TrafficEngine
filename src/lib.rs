@@ -236,23 +236,8 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
     let _handle = thread::spawn(move || {
         let mut senders = HashMap::new();
         let mut tasks: Vec<Vec<(PipelineId, Uuid)>> = Vec::with_capacity(TaskType::NoTaskTypes as usize);
-        let mut start_tsc: HashMap<(PipelineId, &'static str), u64> = HashMap::new();
         let mut reply_to_main = None;
-/*
-        let l234data: Vec<L234Data> = configuration
-            .targets
-            .iter()
-            .enumerate()
-            .map(|(i, srv_cfg)| L234Data {
-                mac: srv_cfg
-                    .mac
-                    .unwrap_or_else(|| get_mac_from_ifname(srv_cfg.linux_if.as_ref().unwrap()).unwrap()),
-                ip: u32::from(srv_cfg.ip),
-                port: srv_cfg.port,
-                server_id: srv_cfg.id.clone(),
-                index: i,
-            }).collect();
-*/
+
         for _t in 0..TaskType::NoTaskTypes as usize {
             tasks.push(Vec::<(PipelineId, Uuid)>::with_capacity(16));
         }
@@ -327,29 +312,6 @@ pub fn spawn_recv_thread(mrx: Receiver<MessageFrom>, mut context: NetBricksConte
                 Ok(MessageFrom::Task(pipeline_id, uuid, task_type)) => {
                     debug!("{}: task uuid= {}, type={:?}", pipeline_id, uuid, task_type);
                     tasks[task_type as usize].push((pipeline_id, uuid));
-                }
-                Ok(MessageFrom::GenTimeStamp(pipeline_id, item, count, tsc0, tsc1)) => {
-                    debug!(
-                        "pipe {}: GenTimeStamp for item {} -> count= {}, tsc0= {}, tsc1= {}",
-                        pipeline_id,
-                        item,
-                        count,
-                        tsc0.separated_string(),
-                        tsc1.separated_string(),
-                    );
-                    if count == 0 {
-                        start_tsc.insert((pipeline_id, item), tsc0);
-                    } else {
-                        let diff = tsc0 - start_tsc.get(&(pipeline_id.clone(), item)).unwrap();
-                        info!(
-                            "pipe {}: item= {}, count= {}, elapsed= {} cy, per count= {} cy",
-                            pipeline_id,
-                            item,
-                            count,
-                            diff.separated_string(),
-                            diff / count as u64,
-                        );
-                    };
                 }
                 Ok(MessageFrom::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, tx_counter)) => {
                     debug!("{}: received Counter", pipeline_id);

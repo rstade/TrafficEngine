@@ -21,7 +21,9 @@ use netfcts::initialize_flowdirector;
 use netfcts::comm::{MessageFrom, MessageTo, };
 use netfcts::system::SystemData;
 use netfcts::system::get_mac_from_ifname;
-use netfcts::io::print_counters;
+use netfcts::io::{ print_tcp_counters };
+#[cfg(feature = "profiling")]
+use netfcts::io::print_rx_tx_counters;
 use netfcts::errors::*;
 
 use traffic_lib::{read_config, setup_pipelines};
@@ -181,29 +183,9 @@ pub fn main() {
             // give threads some time to do initialization work
             thread::sleep(Duration::from_millis(1000 as u64));
 
-
             // start generator
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-            let mut pipeline_completed_count = 0;
-            while pipeline_completed_count < cores.len() {
-                match reply_mrx.recv_timeout(Duration::from_millis(20000)) {
-                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, rx_tx_stats)) => {
-                        print_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from, &rx_tx_stats);
-                        pipeline_completed_count += 1
-                    }
-                    Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                    Err(RecvTimeoutError::Timeout) => {
-                        warn!("Timeout while waiting for pipelines");
-                        break;
-                    }
-                    Err(e) => {
-                        error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
-                        break;
-                    }
-                }
-            }
-
-            thread::sleep(Duration::from_millis(200 as u64));
+            thread::sleep(Duration::from_millis(500 as u64));
 
             mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
             thread::sleep(Duration::from_millis(100 as u64));
@@ -218,7 +200,9 @@ pub fn main() {
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
                     Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, rx_tx_stats)) => {
-                        print_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from, &rx_tx_stats);
+                        print_tcp_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from);
+                        #[cfg(feature = "profiling")]
+                            print_rx_tx_counters(&pipeline_id, &rx_tx_stats);
                         tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                         tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                     }
