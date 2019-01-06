@@ -25,49 +25,16 @@ use netfcts::tcp_common::{TcpState, TcpStatistics, TcpCounter, TcpRole, CData, L
 use cmanager::{Connection, ConnectionManagerC, ConnectionManagerS};
 use EngineConfig;
 use netfcts::system::SystemData;
+use netfcts::TimeAdder;
 use netfcts::is_kni_core;
 use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
-use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, private_etype, PacketInjector, TickGenerator, install_task};
+use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4, private_etype, PacketInjector, TickGenerator, install_task};
 use netfcts::timer_wheel::TimerWheel;
 
 const MIN_FRAME_SIZE: usize = 60;
 // without fcs
 //const OBSERVE_PORT: u16 = 49152;
 
-#[cfg(feature = "profiling")]
-struct TimeAdder {
-    sum: u64,
-    count: u64,
-    name: String,
-    sample_size: u64,
-}
-
-#[cfg(feature = "profiling")]
-impl TimeAdder {
-    fn new(name: &str, sample_size: u64) -> TimeAdder {
-        TimeAdder {
-            sum: 0,
-            count: 0,
-            name: name.to_string(),
-            sample_size,
-        }
-    }
-
-    fn add(&mut self, time_diff: u64) {
-        self.sum += time_diff;
-        self.count += 1;
-
-        if self.count % self.sample_size == 0 {
-            info!(
-                "TimeAdder {}: sum = {}, count= {}, per count= {}",
-                self.name,
-                self.sum,
-                self.count,
-                self.sum / self.count
-            );
-        }
-    }
-}
 
 //#[allow(unused_variables)]
 pub fn setup_generator(
@@ -192,8 +159,10 @@ pub fn setup_generator(
     // group 2 -> send to KNI
     let rxq = pci.rxq();
     let csum_offload = pci.port.csum_offload();
-    let tx_stats = pci.tx_stats();
-    let rx_stats = pci.rx_stats();
+    #[cfg(feature = "profiling")]
+        let tx_stats = pci.tx_stats();
+    #[cfg(feature = "profiling")]
+        let rx_stats = pci.rx_stats();
     let uuid_l4groupby = Uuid::new_v4();
     let uuid_l4groupby_clone = uuid_l4groupby.clone();
     let pipeline_ip = cm_c.ip();
@@ -339,7 +308,7 @@ pub fn setup_generator(
                 ) {
                     c.con_rec.push_state(TcpState::SynReceived);
                     c.dut_mac = h.mac.clone();
-                    c.set_dut_sock(SocketAddrV4::new(Ipv4Addr::from(h.ip.src()), h.tcp.src_port()));
+                    c.set_dut_sock((h.ip.src(), h.tcp.src_port()));
                     // debug!("checksum in = {:X}",p.get_header().checksum());
                     remove_tcp_options(p, h);
                     make_reply_packet(h, 1);
@@ -574,7 +543,7 @@ pub fn setup_generator(
                     tcp: unsafe { &mut *(p.get_mut_header() as *mut TcpHeader) },
                 };
 
-                let hs_flow = hs.ip.flow().unwrap();
+                let src_sock = (hs.ip.src(), hs.tcp.src_port());
 
                 //check ports
                 if !b_private_etype && hs.tcp.dst_port() != me.port && hs.tcp.dst_port() < tcp_port_base {
@@ -585,8 +554,9 @@ pub fn setup_generator(
                 // the port/connection becomes released/ready afterwards
                 // this is cumbersome, but we must make the  borrow checker happy
                 let mut release_connection_c = None;
-                let mut release_connection_s = None;
+                let mut b_release_connection_s = false;
                 let mut ready_connection = None;
+                let server_listen_port = cm_c.special_port();
 
                 // check if we got a packet from generator
                 match (hs.mac.etype(), hs.tcp.dst_port()) {
@@ -622,16 +592,8 @@ pub fn setup_generator(
                         if let Some(c) = cm_c.get_ready_connection() {
                             cdata.client_port = c.port();
                             cdata.uuid = *c.get_uuid();
-                            //let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
                             let bin_vec = serialize(&cdata).unwrap();
-                            //make_payload_packet(p, c, &mut hs, &me, &servers, &pipeline_id_clone, json_string.as_bytes());
                             make_payload_packet(p, c, &mut hs, &me, &servers, &bin_vec);
-                            trace!(
-                                "{}: sending payload packet with payload '' on port {}",
-                                thread_id_2,
-                                //json_string,
-                                c.port(),
-                            );
                             counter_to[TcpStatistics::Payload] += 1;
                             group_index = 1;
                             #[cfg(feature = "profiling")]
@@ -676,26 +638,27 @@ pub fn setup_generator(
                             cm_c.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_c);
                             cm_s.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_s);
                         }
-                        rx_tx_stats.push((
+                        #[cfg(feature = "profiling")]
+                            rx_tx_stats.push((
                             utils::rdtsc_unsafe(),
                             rx_stats.stats.load(Ordering::Relaxed),
                             tx_stats.stats.load(Ordering::Relaxed),
                         ));
                     }
-                    _ => {
-                        if hs.tcp.dst_port() == cm_c.special_port() {
-                            //server side
-                            let mut opt_c = if hs.tcp.syn_flag() {
-                                debug!("got SYN on special port 0x{:x}", cm_c.special_port());
-                                counter_from[TcpStatistics::RecvSyn] += 1;
-                                cm_s.get_mut_or_create(&hs_flow.src_socket_addr())
-                            } else {
-                                cm_s.get_mut(&hs_flow.src_socket_addr())
-                            };
-                            if opt_c.is_none() {
-                                warn!("unexpected packet to server port");
-                            } else {
-                                let mut c = opt_c.unwrap();
+                    (ETYPE_IPV4, dst_port) if dst_port == server_listen_port => {
+                        //server side
+                        let mut opt_c = if hs.tcp.syn_flag() {
+                            debug!("got SYN on special port 0x{:x}", cm_c.special_port());
+                            counter_from[TcpStatistics::RecvSyn] += 1;
+                            let c = cm_s.get_mut_or_insert(&src_sock);
+                            c
+                        } else {
+                            cm_s.get_mut(&src_sock)
+                        };
+
+                        match opt_c {
+                            None => warn!("no state for this packet on server port"),
+                            Some(mut c) => {
                                 let old_s_state = c.con_rec.last_state().clone();
 
                                 //check seqn
@@ -709,7 +672,7 @@ pub fn setup_generator(
                                     } else {
                                         debug!("{} state= {:?}, diff= {}, tcp= {}", thread_id_2, old_s_state, diff, hs.tcp);
                                     }
-                                } else if hs.tcp.syn_flag() {
+                                } else if hs.tcp.syn_flag() { // check flags
                                     if old_s_state == TcpState::Listen {
                                         // replies with a SYN-ACK to client:
                                         syn_received(p, c, &mut hs);
@@ -720,26 +683,16 @@ pub fn setup_generator(
                                         );
                                         counter_from[TcpStatistics::SentSynAck] += 1;
                                         group_index = 1;
+                                        #[cfg(feature = "profiling")]
+                                            time_adders[1].add(utils::rdtsc_unsafe() - timestamp_entry);
                                     } else {
                                         warn!("{} received SYN in state {:?}", thread_id_2, c.con_rec.states());
                                     }
-                                    #[cfg(feature = "profiling")]
-                                        time_adders[1].add(utils::rdtsc_unsafe() - timestamp_entry);
-                                } else if hs.tcp.ack_flag() && old_s_state == TcpState::SynReceived {
-                                    c.con_established();
-                                    counter_from[TcpStatistics::RecvSynAck2] += 1;
-                                    debug!(
-                                        "{} connection from DUT ({:?}) established",
-                                        thread_id_2,
-                                        hs_flow.src_socket_addr()
-                                    );
-                                    #[cfg(feature = "profiling")]
-                                        time_adders[2].add(utils::rdtsc_unsafe() - timestamp_entry);
                                 } else if hs.tcp.fin_flag() {
                                     trace!("received FIN");
                                     if old_s_state >= TcpState::FinWait1 {
                                         if active_close(p, c, &mut hs, &mut counter_from, &old_s_state) {
-                                            release_connection_s = Some(hs_flow.src_socket_addr());
+                                            b_release_connection_s = true;
                                         }
                                         group_index = 1;
                                     } else {
@@ -755,175 +708,179 @@ pub fn setup_generator(
                                     c.con_rec.push_state(TcpState::Closed);
                                     c.con_rec.released(ReleaseCause::PassiveRst);
                                     // release connection in the next block
-                                    release_connection_s = Some(hs_flow.src_socket_addr());
-                                } else if old_s_state == TcpState::LastAck
-                                    && hs.tcp.ack_flag()
-                                    && hs.tcp.ack_num() == c.seqn_nxt
-                                {
-                                    // received final ack in passive close
-                                    trace!("received final ACK in passive close");
-                                    counter_from[TcpStatistics::RecvFinAck2] += 1;
-                                    c.con_rec.push_state(TcpState::Closed);
-                                    c.con_rec.released(ReleaseCause::PassiveClose);
-                                    // release connection in the next block
-                                    release_connection_s = Some(hs_flow.src_socket_addr());
-                                } else if old_s_state >= TcpState::Established {
-                                    if hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
-                                        match old_s_state {
-                                            TcpState::FinWait1 => c.con_rec.push_state(TcpState::FinWait2),
-                                            TcpState::Closing => {
-                                                c.con_rec.push_state(TcpState::Closed);
-                                                release_connection_s = Some(hs_flow.src_socket_addr());
+                                    b_release_connection_s = true;
+                                } else if hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
+                                    match old_s_state {
+                                        TcpState::SynReceived => {
+                                            c.con_established();
+                                            counter_from[TcpStatistics::RecvSynAck2] += 1;
+                                            debug!(
+                                                "{} connection from DUT ({:?}) established",
+                                                thread_id_2,
+                                                src_sock
+                                            );
+                                            #[cfg(feature = "profiling")]
+                                                time_adders[2].add(utils::rdtsc_unsafe() - timestamp_entry);
+                                        }
+                                        TcpState::LastAck => {
+                                            // received final ack in passive close
+                                            trace!("received final ACK in passive close");
+                                            counter_from[TcpStatistics::RecvFinAck2] += 1;
+                                            c.con_rec.push_state(TcpState::Closed);
+                                            c.con_rec.released(ReleaseCause::PassiveClose);
+                                            // release connection in the next block
+                                            b_release_connection_s = true;
+                                        }
+                                        TcpState::FinWait1 => c.con_rec.push_state(TcpState::FinWait2),
+                                        TcpState::Closing => {
+                                            c.con_rec.push_state(TcpState::Closed);
+                                            b_release_connection_s = true;
+                                        }
+                                        _ => (),
+                                    }
+                                }
+
+                                // process payload
+                                if old_s_state >= TcpState::Established && hs.tcp_payload_len() > 0 {
+                                    if c.con_rec.payload_packets == 0 {
+                                        //first payload packet
+                                        match deserialize::<CData>(p.get_payload()) {
+                                            Ok(cdata) => {
+                                                c.set_port(cdata.client_port);
+                                                let uuid = cdata.uuid;
+                                                debug!(
+                                                    "{} received payload {:?}, uuid= {}",
+                                                    thread_id_2,
+                                                    cdata,
+                                                    uuid.unwrap()
+                                                );
+                                                c.set_uuid(uuid);
                                             }
                                             _ => (),
                                         }
-                                    }
-                                    if hs.tcp_payload_len() > 0 {
-                                        if c.con_rec.payload_packets == 0 {
-                                            //first payload packet
-                                            //match serde_json::from_slice::<CData>(p.get_payload()) {
-                                            match deserialize::<CData>(p.get_payload()) {
-                                                Ok(cdata) => {
-                                                    c.set_port(cdata.client_port);
-                                                    let uuid = cdata.uuid;
-                                                    debug!(
-                                                        "{} received payload {:?}, uuid= {}",
-                                                        thread_id_2,
-                                                        cdata,
-                                                        uuid.unwrap()
-                                                    );
-                                                    c.set_uuid(uuid);
-                                                }
-                                                _ => (),
-                                            }
-                                            if old_s_state == TcpState::Established {
-                                                s_reply_with_fin(p, &mut c, &mut hs);
-                                                counter_from[TcpStatistics::SentFin] += 1;
-                                                c.con_rec.released(ReleaseCause::ActiveClose);
-                                                c.con_rec.push_state(TcpState::FinWait1);
-                                            }
-                                            counter_from[TcpStatistics::Payload] += 1;
-                                            c.con_rec.payload_packets += 1;
-                                            group_index = 1;
-                                        } else {
-                                            c.ackn_nxt = hs.tcp.seq_num().wrapping_add(hs.tcp_payload_len() as u32);
+                                        if old_s_state == TcpState::Established {
+                                            s_reply_with_fin(p, &mut c, &mut hs);
+                                            counter_from[TcpStatistics::SentFin] += 1;
+                                            c.con_rec.released(ReleaseCause::ActiveClose);
+                                            c.con_rec.push_state(TcpState::FinWait1);
                                         }
-                                        #[cfg(feature = "profiling")]
-                                            time_adders[3].add(utils::rdtsc_unsafe() - timestamp_entry);
-                                    }
-                                }
-                            }
-                        } else {
-                            // client side
-                            // check that flow steering worked:
-                            if !cm_c.owns_tcp_port(hs.tcp.dst_port()) {
-                                error!("flow steering failed {}", hs.tcp);
-                                assert!(cm_c.owns_tcp_port(hs.tcp.dst_port()));
-                            }
-                            let mut c = cm_c.get_mut_by_port(hs.tcp.dst_port());
-                            #[cfg(feature = "profiling")]
-                                time_adders[0].add(utils::rdtsc_unsafe() - timestamp_entry);
-                            if c.is_some() {
-                                let mut c = c.as_mut().unwrap();
-                                //debug!("incoming packet for connection {}", c);
-                                let mut b_unexpected = false;
-                                let old_c_state = c.con_rec.last_state().clone();
-
-                                //check seqn
-                                if old_c_state != TcpState::SynSent && hs.tcp.seq_num() != c.ackn_nxt {
-                                    let diff = hs.tcp.seq_num() as i64 - c.ackn_nxt as i64;
-                                    if diff > 0 {
-                                        warn!(
-                                            "{} unexpected sequence number (packet loss?) in state {:?}, seqn differs by {}",
-                                            thread_id_2, old_c_state, diff
-                                        );
-                                    } else {
-                                        debug!("{} state= {:?}, diff= {}, tcp= {}", thread_id_2, old_c_state, diff, hs.tcp);
-                                    }
-                                } else if hs.tcp.ack_flag() && hs.tcp.syn_flag() {
-                                    group_index = 1;
-                                    counter_to[TcpStatistics::RecvSynAck] += 1;
-                                    if old_c_state == TcpState::SynSent {
-                                        c.con_established();
-                                        ready_connection = Some(c.port());
-                                        debug!(
-                                            "{} connection for port {} to DUT ({:?}) established ",
-                                            thread_id_2,
-                                            c.port(),
-                                            hs_flow.src_socket_addr()
-                                        );
-                                        synack_received(p, &mut c, &mut hs);
-                                        counter_to[TcpStatistics::SentSynAck2] += 1;
-                                    } else if old_c_state == TcpState::Established {
-                                        synack_received(p, &mut c, &mut hs);
-                                        counter_to[TcpStatistics::SentSynAck2] += 1;
-                                    } else {
-                                        warn!("{} received SYN-ACK in wrong state: {:?}", thread_id_2, old_c_state);
-                                        group_index = 0;
-                                    } // ignore the SynAck
-                                } else if hs.tcp.fin_flag() {
-                                    if old_c_state >= TcpState::FinWait1 {
-                                        active_close(p, c, &mut hs, &mut counter_to, &old_c_state);
+                                        counter_from[TcpStatistics::Payload] += 1;
+                                        c.con_rec.payload_packets += 1;
                                         group_index = 1;
                                     } else {
-                                        passive_close(p, c, &mut hs, &thread_id_2, &mut counter_to);
-                                        group_index = 1;
+                                        c.ackn_nxt = hs.tcp.seq_num().wrapping_add(hs.tcp_payload_len() as u32);
                                     }
                                     #[cfg(feature = "profiling")]
-                                        time_adders[7].add(utils::rdtsc_unsafe() - timestamp_entry);
-                                } else if hs.tcp.rst_flag() {
-                                    counter_to[TcpStatistics::RecvRst] += 1;
-                                    c.con_rec.push_state(TcpState::Closed);
-                                    c.con_rec.released(ReleaseCause::PassiveRst);
-                                    // release connection in the next block
-                                    release_connection_c = Some(c.port());
-                                } else if old_c_state == TcpState::LastAck
-                                    && hs.tcp.ack_flag()
-                                    && hs.tcp.ack_num() == c.seqn_nxt
-                                {
-                                    counter_to[TcpStatistics::RecvFinAck2] += 1;
-                                    c.con_rec.push_state(TcpState::Closed);
-                                    c.con_rec.released(ReleaseCause::PassiveClose);
-                                    // release connection in the next block
-                                    release_connection_c = Some(c.port());
-                                } else if hs.tcp.ack_flag() {
-                                    // ACKs to payload packets
-                                } else {
-                                    counter_to[TcpStatistics::Unexpected] += 1;
-                                    // debug!("received from server { } in c/s state {:?}/{:?} ", hs.tcp, c.con_rec.c_state, c.con_rec.s_state);
-                                    b_unexpected = true; //  except we revise it, see below
+                                        time_adders[3].add(utils::rdtsc_unsafe() - timestamp_entry);
                                 }
-
-                                if b_unexpected {
-                                    warn!(
-                                        "{} unexpected TCP packet on port {} in client state {:?}, sending to KNI i/f: {}",
-                                        thread_id_2,
-                                        hs.tcp.dst_port(),
-                                        c.con_rec.states(),
-                                        hs.tcp,
-                                    );
-                                    group_index = 2;
-                                }
-                            } else {
-                                warn!(
-                                    "{} engine has no state for {}:{}, sending to KNI i/f",
-                                    thread_id_2,
-                                    hs.ip,
-                                    hs.tcp,
-                                    //Ipv4Addr::from(hs.ip.dst()),
-                                    // hs.tcp.dst_port(),
-                                );
-                                // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
-                                group_index = 2;
                             }
                         }
                     }
+                    (ETYPE_IPV4, client_port) => {
+                        // client side
+                        // check that flow steering worked:
+                        if !cm_c.owns_tcp_port(client_port) {
+                            error!("flow steering failed {}", hs.tcp);
+                            assert!(cm_c.owns_tcp_port(hs.tcp.dst_port()));
+                        }
+                        let mut c = cm_c.get_mut_by_port(hs.tcp.dst_port());
+                        #[cfg(feature = "profiling")]
+                            time_adders[0].add(utils::rdtsc_unsafe() - timestamp_entry);
+                        if c.is_some() {
+                            let mut c = c.as_mut().unwrap();
+                            //debug!("incoming packet for connection {}", c);
+                            let old_c_state = c.con_rec.last_state().clone();
+
+                            //check seqn
+                            if old_c_state != TcpState::SynSent && hs.tcp.seq_num() != c.ackn_nxt {
+                                let diff = hs.tcp.seq_num() as i64 - c.ackn_nxt as i64;
+                                if diff > 0 {
+                                    warn!(
+                                        "{} unexpected sequence number (packet loss?) in state {:?}, seqn differs by {}",
+                                        thread_id_2, old_c_state, diff
+                                    );
+                                } else {
+                                    debug!("{} state= {:?}, diff= {}, tcp= {}", thread_id_2, old_c_state, diff, hs.tcp);
+                                }
+                            } else if hs.tcp.ack_flag() && hs.tcp.syn_flag() {
+                                group_index = 1;
+                                counter_to[TcpStatistics::RecvSynAck] += 1;
+                                if old_c_state == TcpState::SynSent {
+                                    c.con_established();
+                                    ready_connection = Some(c.port());
+                                    debug!(
+                                        "{} connection for port {} to DUT ({:?}) established ",
+                                        thread_id_2,
+                                        c.port(),
+                                        src_sock
+                                    );
+                                    synack_received(p, &mut c, &mut hs);
+                                    counter_to[TcpStatistics::SentSynAck2] += 1;
+                                } else if old_c_state == TcpState::Established {
+                                    synack_received(p, &mut c, &mut hs);
+                                    counter_to[TcpStatistics::SentSynAck2] += 1;
+                                } else {
+                                    warn!("{} received SYN-ACK in wrong state: {:?}", thread_id_2, old_c_state);
+                                    group_index = 0;
+                                } // ignore the SynAck
+                            } else if hs.tcp.fin_flag() {
+                                if old_c_state >= TcpState::FinWait1 {
+                                    active_close(p, c, &mut hs, &mut counter_to, &old_c_state);
+                                    group_index = 1;
+                                } else {
+                                    passive_close(p, c, &mut hs, &thread_id_2, &mut counter_to);
+                                    group_index = 1;
+                                }
+                                #[cfg(feature = "profiling")]
+                                    time_adders[7].add(utils::rdtsc_unsafe() - timestamp_entry);
+                            } else if hs.tcp.rst_flag() {
+                                counter_to[TcpStatistics::RecvRst] += 1;
+                                c.con_rec.push_state(TcpState::Closed);
+                                c.con_rec.released(ReleaseCause::PassiveRst);
+                                // release connection in the next block
+                                release_connection_c = Some(c.port());
+                            } else if old_c_state == TcpState::LastAck
+                                && hs.tcp.ack_flag()
+                                && hs.tcp.ack_num() == c.seqn_nxt
+                            {
+                                counter_to[TcpStatistics::RecvFinAck2] += 1;
+                                c.con_rec.push_state(TcpState::Closed);
+                                c.con_rec.released(ReleaseCause::PassiveClose);
+                                // release connection in the next block
+                                release_connection_c = Some(c.port());
+                            } else if hs.tcp.ack_flag() {
+                                // ACKs to payload packets
+                            } else {
+                                counter_to[TcpStatistics::Unexpected] += 1;
+                                warn!(
+                                    "{} unexpected TCP packet on port {} in client state {:?}, sending to KNI i/f: {}",
+                                    thread_id_2,
+                                    hs.tcp.dst_port(),
+                                    c.con_rec.states(),
+                                    hs.tcp,
+                                );
+                                group_index = 2;
+                            }
+                        } else {
+                            warn!(
+                                "{} engine has no state for {}:{}, sending to KNI i/f",
+                                thread_id_2,
+                                hs.ip,
+                                hs.tcp,
+                                //Ipv4Addr::from(hs.ip.dst()),
+                                // hs.tcp.dst_port(),
+                            );
+                            // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
+                            group_index = 2;
+                        }
+                    }
+                    (_, _) => { assert!(false) } // should never happen
                 }
 
                 // here we check if we shall release the connection state,
                 // need this cumbersome way because of borrow checker for the connection managers
-                if let Some(sock) = release_connection_s {
-                    cm_s.release_sock(&sock);
+                if b_release_connection_s {
+                    cm_s.release_sock(&src_sock);
                     #[cfg(feature = "profiling")]
                         time_adders[10].add(utils::rdtsc_unsafe() - timestamp_entry);
                 }

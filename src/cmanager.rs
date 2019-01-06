@@ -1,5 +1,5 @@
-use std::net::{SocketAddrV4, Ipv4Addr};
-use std::collections::{HashMap, VecDeque};
+use std::net::{Ipv4Addr};
+use std::collections::{VecDeque, BTreeMap};
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::fmt;
 use std::mem;
@@ -29,7 +29,7 @@ pub struct Connection {
 
 impl Connection {
     #[inline]
-    fn initialize(&mut self, sock: Option<&SocketAddrV4>, port: u16, role: TcpRole) {
+    fn initialize(&mut self, sock: Option<&(u32,u16)>, port: u16, role: TcpRole) {
         self.seqn_nxt = 0;
         self.seqn_una = 0;
         self.ackn_nxt = 0;
@@ -37,6 +37,7 @@ impl Connection {
         self.con_rec.init(role, port, sock);
     }
 
+    #[inline]
     fn new() -> Connection {
         Connection {
             seqn_nxt: 0, //next seqn towards DUT
@@ -75,12 +76,12 @@ impl Connection {
     }
 
     #[inline]
-    pub fn get_dut_sock(&self) -> Option<&SocketAddrV4> {
+    pub fn get_dut_sock(&self) -> Option<&(u32, u16)> {
         self.con_rec.sock.as_ref()
     }
 
     #[inline]
-    pub fn set_dut_sock(&mut self, dut_sock: SocketAddrV4) {
+    pub fn set_dut_sock(&mut self, dut_sock: (u32, u16)) {
         self.con_rec.sock = Some(dut_sock);
     }
 
@@ -176,7 +177,7 @@ impl ConnectionManagerC {
         if opt_port.is_some() {
             let port = opt_port.unwrap();
             {
-                let sock=SocketAddrV4::new(Ipv4Addr::from(self.ip), port);
+                let sock = (self.ip, port);
                 let cc = self.get_mut_con(&port);
                 assert_eq!(cc.port(), 0);
                 cc.initialize(Some(&sock), port, role);
@@ -264,7 +265,7 @@ impl ConnectionManagerC {
             self.free_ports.push_back(port);
             assert_eq!(port, c.port());
             c.set_port(0u16); // this indicates an unused connection,
-                              // we keep unused connection in port2con table
+            // we keep unused connection in port2con table
         }
     }
 
@@ -340,9 +341,73 @@ impl ConnectionManagerC {
     }
 }
 
+pub struct Sock2Index {
+    sock_tree: BTreeMap<u32, usize>,
+    port_maps: Vec<Box<[u16; 0xFFFF]>>,
+    free_maps: VecDeque<usize>,
+}
+
+impl<'a> Sock2Index {
+    pub fn new() -> Sock2Index {
+        Sock2Index {
+            sock_tree: BTreeMap::new(),
+            port_maps: vec![Box::new([0; 0xFFFF]); 8],
+            free_maps: (0..8).collect(),
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, sock: &(u32,u16)) -> Option<&u16> {
+        let ip = sock.0;
+        let port = sock.1;
+        let port_map = self.sock_tree.get(&ip);
+        match port_map {
+            None => None,
+            Some(port_map) => match self.port_maps[*port_map][port as usize] {
+                0 => None,
+                _ => Some(&self.port_maps[*port_map][port as usize] ),
+            },
+        }
+    }
+
+    #[inline]
+    pub fn insert(&mut self, sock: (u32,u16), index: u16) {
+        let ip = sock.0;
+        let is_new_ip = self.sock_tree.get(&ip).is_none();
+        if is_new_ip {
+            let free_map_ix=self.free_maps.pop_front().expect("currently only 8 IP source addresses are supported");
+            self.sock_tree.insert(ip, free_map_ix);
+        }
+        let port_map_ix = self.sock_tree.get(&ip).unwrap();
+        self.port_maps[*port_map_ix][sock.1 as usize] = index;
+    }
+
+    #[inline]
+    pub fn remove(&mut self, sock: &(u32,u16)) -> Option<u16> {
+        let port_map_ix = self.sock_tree.get(&sock.0);
+        if port_map_ix.is_none() {
+            return None;
+        } else {
+            let pm_ix = **port_map_ix.as_ref().unwrap();
+            let old = self.port_maps[pm_ix][sock.1 as usize];
+            self.port_maps[pm_ix][sock.1 as usize]= 0;
+            match old {
+                0 => None,
+                _ => Some(old),
+            }
+        }
+    }
+
+    pub fn values(&'a self) -> Vec<u16> {
+        self.sock_tree.values().flat_map(|i| {
+            self.port_maps[*i as usize].iter().filter(|ix| **ix != 0).map(|ix| *ix).collect::<Vec<u16>>()
+        }).collect()
+    }
+}
+
 pub struct ConnectionManagerS {
     c_record_store: Vec<ConRecord>,
-    sock2index: HashMap<SocketAddrV4, usize>,
+    sock2index: Sock2Index,
     connections: Vec<Connection>,
     free_slots: VecDeque<usize>,
 }
@@ -354,34 +419,33 @@ impl ConnectionManagerS {
         store.pop(); // warming the Vec up! obviously when storing the first element in a Vec expensive initialization code runs
         ConnectionManagerS {
             c_record_store: store,
-            sock2index: HashMap::with_capacity(MAX_CONNECTIONS),
+            sock2index: Sock2Index::new(),
             connections: vec![Connection::new(); MAX_CONNECTIONS],
-            free_slots: (0..MAX_CONNECTIONS).collect(),
+            free_slots: (1..MAX_CONNECTIONS).collect(), // we use index 0 to indicate unused slots
         }
     }
 
-    pub fn get_mut(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
-        trace!("get_mut");
+    pub fn get_mut(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
         let index = self.sock2index.get(sock);
         if index.is_some() {
-            Some(&mut self.connections[*index.unwrap()])
+            Some(&mut self.connections[*index.unwrap() as usize])
         } else {
             None
         }
     }
 
-    pub fn get_mut_or_create(&mut self, sock: &SocketAddrV4) -> Option<&mut Connection> {
-        trace!("get_mut_or_create");
+    pub fn get_mut_or_insert(&mut self, sock: &(u32,u16)) -> Option<&mut Connection> {
         {
             let index = self.sock2index.get(sock);
             if index.is_some() {
-                return Some(&mut self.connections[*index.unwrap()]);
+                return Some(&mut self.connections[*index.unwrap() as usize]);
             }
         }
         // create
         let index = self.free_slots.pop_front();
         if index.is_some() {
-            self.sock2index.insert(*sock, index.unwrap());
+            //self.sock2index.insert(*sock, index.unwrap());
+            self.sock2index.insert(*sock, index.unwrap() as u16);
             let c = &mut self.connections[index.unwrap()];
             c.initialize(Some(sock), 0, TcpRole::Server);
             Some(c)
@@ -390,22 +454,33 @@ impl ConnectionManagerS {
         }
     }
 
-    pub fn release_sock(&mut self, sock: &SocketAddrV4) {
-        trace!("release_sock");
-        // only if it is in use, i.e. it has been not released already
-        let index = self.sock2index.remove(sock);
+    pub fn insert(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
+        let index = self.free_slots.pop_front();
         if index.is_some() {
-            let mut c = self.connections[index.unwrap()].clone();
+            self.sock2index.insert(*sock, index.unwrap() as u16);
+            let c = &mut self.connections[index.unwrap()];
+            c.initialize(Some(sock), 0, TcpRole::Server);
+            Some(c)
+        } else {
+            None // out of resources
+        }
+    }
+
+    pub fn release_sock(&mut self, sock: &(u32,u16)) {
+        // only if it is in use, i.e. it has been not released already
+        let index = self.sock2index.remove(&sock);
+        if index.is_some() {
+            let mut c = self.connections[index.unwrap() as usize].clone();
             if c.get_uuid().is_none() {
                 c.make_uuid();
             }
             self.c_record_store.push(c.con_rec.clone());
-            self.free_slots.push_back(index.unwrap());
+            self.free_slots.push_back(index.unwrap() as usize);
         }
     }
 
     //TODO allow for more precise time out conditions, currently whole TCP connections are timed out, also we should send a RST
-    pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<SocketAddrV4>) {
+    pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<(u32,u16)>) {
         trace!("release_timeouts");
         loop {
             match wheel.tick(now) {
@@ -427,7 +502,7 @@ impl ConnectionManagerS {
     }
 
     #[inline]
-    fn timeout(&mut self, sock: &SocketAddrV4) {
+    fn timeout(&mut self, sock: &(u32, u16)) {
         {
             let mut c = self.get_mut(sock);
             if c.is_some() {
@@ -442,13 +517,13 @@ impl ConnectionManagerS {
     pub fn record_uncompleted(&mut self) {
         let c_records = &mut self.c_record_store;
         let connections = &self.connections;
-        self.sock2index.values().for_each(|i| {
-            let mut c = connections[*i].clone();
+        for index in self.sock2index.values() {
+            let mut c = connections[index as usize].clone();
             if c.get_uuid().is_none() {
                 c.make_uuid();
             }
             c_records.push(c.con_rec.clone());
-        });
+        };
     }
 
     pub fn fetch_c_records(&mut self) -> Vec<ConRecord> {

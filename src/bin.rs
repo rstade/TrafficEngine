@@ -45,6 +45,7 @@ use std::str::FromStr;
 use std::io::{Write, BufWriter};
 use std::error::Error;
 use std::fs::File;
+use std::net::{SocketAddrV4, Ipv4Addr};
 
 use separator::Separatable;
 use ipnet::Ipv4Net;
@@ -270,7 +271,8 @@ pub fn main() {
                                 "        ({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, +{}, {:?})\n",
                                 c_server.role,
                                 if c_server.sock.is_some() {
-                                    c_server.sock.unwrap().to_string()
+                                    let s= c_server.sock.unwrap();
+                                    SocketAddrV4::new(Ipv4Addr::from(s.0), s.1).to_string()
                                 } else {
                                     "none".to_string()
                                 },
