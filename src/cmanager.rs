@@ -29,7 +29,7 @@ pub struct Connection {
 
 impl Connection {
     #[inline]
-    fn initialize(&mut self, sock: Option<&(u32,u16)>, port: u16, role: TcpRole) {
+    fn initialize(&mut self, sock: Option<&(u32, u16)>, port: u16, role: TcpRole) {
         self.seqn_nxt = 0;
         self.seqn_una = 0;
         self.ackn_nxt = 0;
@@ -238,9 +238,11 @@ impl ConnectionManagerC {
                         break;
                     }
                 }
-                (None, more) => if !more {
-                    break;
-                },
+                (None, more) => {
+                    if !more {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -265,7 +267,7 @@ impl ConnectionManagerC {
             self.free_ports.push_back(port);
             assert_eq!(port, c.port());
             c.set_port(0u16); // this indicates an unused connection,
-            // we keep unused connection in port2con table
+                              // we keep unused connection in port2con table
         }
     }
 
@@ -357,7 +359,7 @@ impl<'a> Sock2Index {
     }
 
     #[inline]
-    pub fn get(&self, sock: &(u32,u16)) -> Option<&u16> {
+    pub fn get(&self, sock: &(u32, u16)) -> Option<&u16> {
         let ip = sock.0;
         let port = sock.1;
         let port_map = self.sock_tree.get(&ip);
@@ -365,17 +367,20 @@ impl<'a> Sock2Index {
             None => None,
             Some(port_map) => match self.port_maps[*port_map][port as usize] {
                 0 => None,
-                _ => Some(&self.port_maps[*port_map][port as usize] ),
+                _ => Some(&self.port_maps[*port_map][port as usize]),
             },
         }
     }
 
     #[inline]
-    pub fn insert(&mut self, sock: (u32,u16), index: u16) {
+    pub fn insert(&mut self, sock: (u32, u16), index: u16) {
         let ip = sock.0;
         let is_new_ip = self.sock_tree.get(&ip).is_none();
         if is_new_ip {
-            let free_map_ix=self.free_maps.pop_front().expect("currently only 8 IP source addresses are supported");
+            let free_map_ix = self
+                .free_maps
+                .pop_front()
+                .expect("currently only 8 IP source addresses are supported");
             self.sock_tree.insert(ip, free_map_ix);
         }
         let port_map_ix = self.sock_tree.get(&ip).unwrap();
@@ -383,14 +388,14 @@ impl<'a> Sock2Index {
     }
 
     #[inline]
-    pub fn remove(&mut self, sock: &(u32,u16)) -> Option<u16> {
+    pub fn remove(&mut self, sock: &(u32, u16)) -> Option<u16> {
         let port_map_ix = self.sock_tree.get(&sock.0);
         if port_map_ix.is_none() {
             return None;
         } else {
             let pm_ix = **port_map_ix.as_ref().unwrap();
             let old = self.port_maps[pm_ix][sock.1 as usize];
-            self.port_maps[pm_ix][sock.1 as usize]= 0;
+            self.port_maps[pm_ix][sock.1 as usize] = 0;
             match old {
                 0 => None,
                 _ => Some(old),
@@ -399,9 +404,16 @@ impl<'a> Sock2Index {
     }
 
     pub fn values(&'a self) -> Vec<u16> {
-        self.sock_tree.values().flat_map(|i| {
-            self.port_maps[*i as usize].iter().filter(|ix| **ix != 0).map(|ix| *ix).collect::<Vec<u16>>()
-        }).collect()
+        self.sock_tree
+            .values()
+            .flat_map(|i| {
+                self.port_maps[*i as usize]
+                    .iter()
+                    .filter(|ix| **ix != 0)
+                    .map(|ix| *ix)
+                    .collect::<Vec<u16>>()
+            })
+            .collect()
     }
 }
 
@@ -434,7 +446,7 @@ impl ConnectionManagerS {
         }
     }
 
-    pub fn get_mut_or_insert(&mut self, sock: &(u32,u16)) -> Option<&mut Connection> {
+    pub fn get_mut_or_insert(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
         {
             let index = self.sock2index.get(sock);
             if index.is_some() {
@@ -466,7 +478,7 @@ impl ConnectionManagerS {
         }
     }
 
-    pub fn release_sock(&mut self, sock: &(u32,u16)) {
+    pub fn release_sock(&mut self, sock: &(u32, u16)) {
         // only if it is in use, i.e. it has been not released already
         let index = self.sock2index.remove(&sock);
         if index.is_some() {
@@ -480,7 +492,7 @@ impl ConnectionManagerS {
     }
 
     //TODO allow for more precise time out conditions, currently whole TCP connections are timed out, also we should send a RST
-    pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<(u32,u16)>) {
+    pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<(u32, u16)>) {
         trace!("release_timeouts");
         loop {
             match wheel.tick(now) {
@@ -494,9 +506,11 @@ impl ConnectionManagerS {
                         break;
                     }
                 }
-                (None, more) => if !more {
-                    break;
-                },
+                (None, more) => {
+                    if !more {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -523,7 +537,7 @@ impl ConnectionManagerS {
                 c.make_uuid();
             }
             c_records.push(c.con_rec.clone());
-        };
+        }
     }
 
     pub fn fetch_c_records(&mut self) -> Vec<ConRecord> {

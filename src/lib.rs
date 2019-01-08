@@ -211,7 +211,8 @@ pub fn setup_pipelines(
                     kni_port: kni.unwrap().port.clone(),
                     last_tick: 0,
                 },
-            ).move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
+            )
+            .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
         );
     }
 
