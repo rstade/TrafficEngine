@@ -236,7 +236,7 @@ pub fn main() {
                 let mut total_connections = 0;
                 {
                     let cc = &(con_records_c[0].1);
-                    min_total = cc.last().unwrap().clone();
+                    min_total = cc.iter().last().unwrap().clone();
                     max_total = min_total.clone();
                 }
 
@@ -249,7 +249,7 @@ pub fn main() {
                         {
                             completed_count_s += 1
                         };
-                        by_uuid.insert(c.uuid.unwrap(), c);
+                        by_uuid.insert(c.uid(), c);
                     });
                 }
 
@@ -263,8 +263,8 @@ pub fn main() {
                         let mut min = c_records_client.iter().last().unwrap();
                         let mut max = min;
                         c_records_client.iter().enumerate().for_each(|(i, c)| {
-                            let uuid = c.uuid.as_ref().unwrap();
-                            let c_server = by_uuid.remove(uuid);
+                            let uuid = c.uid();
+                            let c_server = by_uuid.remove(&uuid);
                             let line = format!("{:6}: {}\n", i, c);
                             f.write_all(line.as_bytes()).expect("cannot write c_records");
                             if c_server.is_some() {

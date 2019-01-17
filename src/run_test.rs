@@ -25,13 +25,13 @@ use e2d2::interface::{PortQueue, PortType};
 use e2d2::scheduler::{initialize_system, NetBricksContext};
 use e2d2::scheduler::StandaloneScheduler;
 use e2d2::allocators::CacheAligned;
+use e2d2::utils;
 
 use ipnet::Ipv4Net;
 use env_logger;
 //use serde_json;
 use separator::Separatable;
 use netfcts::{initialize_flowdirector, FlowSteeringMode};
-use uuid::Uuid;
 
 use read_config;
 use netfcts::system::get_mac_from_ifname;
@@ -261,7 +261,7 @@ pub fn run_test(test_type: TestType) {
                                 let cdata = CData::new(
                                     SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080),
                                     0xFFFF,
-                                    Some(Uuid::new_v4()),
+                                    utils::rdtsc_unsafe(),
                                 );
                                 //let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
                                 //stream.write(json_string.as_bytes()).expect("cannot write to stream");
@@ -305,6 +305,7 @@ pub fn run_test(test_type: TestType) {
                 */
                 mtx.send(MessageFrom::FetchCounter).unwrap();
                 mtx.send(MessageFrom::FetchCRecords).unwrap();
+
 
                 let mut tcp_counters_to = HashMap::new();
                 let mut tcp_counters_from = HashMap::new();
@@ -384,13 +385,13 @@ pub fn run_test(test_type: TestType) {
                                 tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck],
                                 tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSynAck2]
                             );
-                            assert_eq!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFin],
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFinAck]
+                            assert!(
+                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFin] + tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFinPssv] <=
+                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentAck4Fin]
                             );
-                            assert_eq!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFinAck],
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFinAck2]
+                            assert!(
+                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFinPssv] +  tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFin] <=
+                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
                             );
                         }
                     }
@@ -400,7 +401,7 @@ pub fn run_test(test_type: TestType) {
                     for (p, (c_records, _)) in &con_records {
                         let mut completed_count = 0;
                         info!("Pipeline {}:", p);
-                        f.write_all(format!("Pipeline {}:", p).as_bytes())
+                        f.write_all(format!("Pipeline {}:\n", p).as_bytes())
                             .expect("cannot write c_records");
                         c_records.iter().enumerate().for_each(|(i, c)| {
                             let line = format!("{:6}: {}\n", i, c);
