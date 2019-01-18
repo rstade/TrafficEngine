@@ -1,5 +1,5 @@
 use std::net::Ipv4Addr;
-use std::collections::{VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::fmt;
 use std::mem;
@@ -9,7 +9,6 @@ use std::rc::Rc;
 use e2d2::headers::MacHeader;
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PacketRx, PortQueue, L4Flow};
-use e2d2::utils;
 
 use netfcts::timer_wheel::TimerWheel;
 use PipelineId;
@@ -27,49 +26,58 @@ pub struct Connection {
     pub seqn_una: u32,
     /// current ack no towards DUT (expected seqn)
     pub ackn_nxt: u32,
-    pub dut_mac: MacHeader, // server side mac, i.e. mac of DUT
-    store: Rc<RefCell<RecordStore>>
+    pub dut_mac: MacHeader,
+    // server side mac, i.e. mac of DUT
+    store: Option<Rc<RefCell<RecordStore>>>,
 }
+
+const ERR_NO_CON_RECORD: &str = "connection has no ConRecord";
 
 impl Connection {
     #[inline]
-    fn initialize(&mut self, sock: Option<(u32, u16)>, port: u16, role: TcpRole) {
+    fn initialize(&mut self, sock: Option<(u32, u16)>, port: u16, role: TcpRole, store: Rc<RefCell<RecordStore>>) {
         self.seqn_nxt = 0;
         self.seqn_una = 0;
         self.ackn_nxt = 0;
         self.dut_mac = MacHeader::default();
-        self.con_rec = Some(self.store.borrow_mut().get_unused_slot());
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().init(role, port, sock);
+        self.con_rec = Some(store.borrow_mut().get_unused_slot());
+        self.store = Some(store);
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().init(role, port, sock);
     }
 
     #[inline]
-    fn new(store: Rc<RefCell<RecordStore>>) -> Connection {
+    fn new() -> Connection {
         Connection {
             seqn_nxt: 0, //next seqn towards DUT
             seqn_una: 0, // acked by DUT
             ackn_nxt: 0, //next ackn towards DUT
             dut_mac: MacHeader::default(),
             con_rec: None,
-            store,
+            store: None,
         }
     }
 
+    #[inline]
+    pub fn release_conrec(&mut self) {
+        self.con_rec = None;
+        self.store = None;
+    }
 
     #[inline]
     pub fn con_established(&mut self) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().push_state(TcpState::Established);
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().push_state(TcpState::Established);
     }
 
     #[allow(dead_code)]
     #[inline]
     pub fn server_syn_sent(&mut self) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().push_state(TcpState::SynSent);
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().push_state(TcpState::SynSent);
         //self.con_rec().s_syn_sent = utils::rdtsc_unsafe();
     }
 
     #[inline]
     pub fn port(&self) -> u16 {
-        self.store.borrow().get(self.con_rec.expect("connection has no ConRecord")).unwrap().port
+        self.store.as_ref().unwrap().borrow().get(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().port
     }
 
     #[inline]
@@ -79,69 +87,68 @@ impl Connection {
 
     #[inline]
     pub fn server_index(&self) -> usize {
-        self.store.borrow().get(self.con_rec.expect("connection has no ConRecord")).unwrap().server_index
+        self.store.as_ref().unwrap().borrow().get(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().server_index
     }
 
     #[inline]
     pub fn set_server_index(&mut self, index: usize) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().server_index=index
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().server_index = index
     }
 
     #[inline]
     pub fn payload_packets(&self) -> usize {
-        self.store.borrow().get(self.con_rec.expect("connection has no ConRecord")).unwrap().payload_packets
+        self.store.as_ref().unwrap().borrow().get(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().payload_packets
     }
 
     #[inline]
     pub fn increment_payload_packets(&self) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().payload_packets+=1
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().payload_packets += 1
     }
 
     #[inline]
     pub fn last_state(&self) -> TcpState {
-        *self.store.borrow().get(self.con_rec.expect("connection has no ConRecord")).unwrap().last_state()
+        *self.store.as_ref().unwrap().borrow().get(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().last_state()
     }
 
     #[inline]
     pub fn states(&self) -> Vec<TcpState> {
-        self.store.borrow().get(self.con_rec.expect("connection has no ConRecord")).unwrap().states().to_vec()
+        self.store.as_ref().unwrap().borrow().get(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().states().to_vec()
     }
 
     #[inline]
     pub fn push_state(&self, state: TcpState) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().push_state(state)
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().push_state(state)
     }
 
     #[inline]
     pub fn released(&self, cause: ReleaseCause) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().released(cause)
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().released(cause)
     }
 
     #[inline]
     pub fn set_port(&mut self, port: u16) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().port = port;
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().port = port;
     }
 
     #[inline]
     pub fn get_dut_sock(&self) -> Option<(u32, u16)> {
-        self.store.borrow().get(self.con_rec.expect("connection has no ConRecord")).unwrap().sock
+        self.store.as_ref().unwrap().borrow().get(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().sock
     }
 
     #[inline]
     pub fn set_dut_sock(&mut self, dut_sock: (u32, u16)) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().sock = Some(dut_sock);
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().sock = Some(dut_sock);
     }
 
     #[inline]
     pub fn set_uid(&mut self, uid: u64) {
-        self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().set_uid(uid);
+        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().set_uid(uid);
     }
 
     #[inline]
     pub fn get_uid(&self) -> u64 {
-        self.store.borrow().get(self.con_rec.expect("connection has no ConRecord")).unwrap().uid()
+        self.store.as_ref().unwrap().borrow().get(self.con_rec.expect(ERR_NO_CON_RECORD)).unwrap().uid()
     }
-
 }
 
 impl fmt::Display for Connection {
@@ -150,7 +157,7 @@ impl fmt::Display for Connection {
             f,
             "Connection(s-port={}, {:?})",
             self.port(),
-            self.store.borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().states(),
+            self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().states(),
             //self.con_rec().s_states(),
         )
     }
@@ -182,10 +189,10 @@ impl ConnectionManagerC {
         let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let max_tcp_port: u16 = tcp_port_base + !port_mask;
-        let store= Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
+        let store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
         let cm = ConnectionManagerC {
             c_record_store: store.clone(),
-            port2con: vec![Connection::new(store); (!port_mask + 1) as usize],
+            port2con: vec![Connection::new(); (!port_mask + 1) as usize],
             // port 0 is reserved and not usable for us, ports are shuffled for better load sharing in DUTs
             // max_tcp_port itself is reserved for the server side for listening
             free_ports: {
@@ -225,8 +232,8 @@ impl ConnectionManagerC {
             let port = opt_port.unwrap();
             {
                 let sock = (self.ip, port);
-                let cc = self.get_mut_con(&port);
-                cc.initialize(Some(sock), port, role);
+                let store = Rc::clone(&self.c_record_store);
+                self.get_mut_con(&port).initialize(Some(sock), port, role, store);
             }
             Some(self.get_mut_con(&port))
         } else {
@@ -296,23 +303,29 @@ impl ConnectionManagerC {
 
     #[inline]
     fn timeout(&mut self, port: u16) {
+        // the borrow checker makes things a little bit cumbersome:
+        let mut in_use = false;
         {
             let c = self.get_mut_con(&port);
             if c.in_use() {
+                in_use = true;
                 c.released(ReleaseCause::Timeout);
                 c.push_state(TcpState::Closed);
+                // now we release the connection inline (cannot call self.release)
+                c.set_port(0u16); // this indicates an unused connection,
+                c.release_conrec();
             }
         }
-        self.release_port(port);
+        if in_use { self.free_ports.push_back(port); }
     }
 
-    pub fn release_port(&mut self, port: u16) {
+    pub fn release(&mut self, port: u16) {
         let c = &mut self.port2con[(port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
         if c.in_use() {
-            self.free_ports.push_front(port);
-            assert_eq!(port, c.port());
+            self.free_ports.push_back(port);
             c.set_port(0u16); // this indicates an unused connection,
+            c.release_conrec();
             // we keep unused connection in port2con table
         }
     }
@@ -341,19 +354,19 @@ impl ConnectionManagerC {
 
     pub fn fetch_c_records(&mut self) -> Option<RecordStore> {
         // we are "moving" the con_records out, and replace it with a new one
-        let new_store= Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
-        let new_store_clone = Rc::clone(&new_store);
-        let store=mem::replace(&mut self.c_record_store, new_store);
-        for mut c in &mut self.port2con {
-            c.store= Rc::clone(&new_store_clone)
+        let new_store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
+        let store = mem::replace(&mut self.c_record_store, new_store);
+        let strong_count = Rc::strong_count(&store);
+        debug!("cm_s.fetch_c_records: strong_count= { }", strong_count);
+        if strong_count > 0 {
+            for c in &mut self.port2con {
+                c.release_conrec();
+            }
         }
-        let strong_count= Rc::strong_count(&store);
-        let unwrapped= Rc::try_unwrap(store);
+        let unwrapped = Rc::try_unwrap(store);
         if unwrapped.is_ok() {
             Some(unwrapped.unwrap().into_inner())
-        }
-        else {
-            error!("cm_s.fetch_c_records: strong_count= { }" , strong_count);
+        } else {
             None
         }
     }
@@ -388,17 +401,9 @@ impl ConnectionManagerC {
             None
         }
     }
-
-    #[allow(dead_code)]
-    pub fn release_ports(&mut self, ports: Vec<u16>) {
-        ports.iter().for_each(|p| {
-            self.release_port(*p);
-        })
-    }
 }
 
 use netfcts::utils::Sock2Index as Sock2Index;
-use netfcts::utils::TimeAdder;
 
 pub struct ConnectionManagerS {
     c_record_store: Rc<RefCell<RecordStore>>,
@@ -413,12 +418,12 @@ impl ConnectionManagerS {
         ConnectionManagerS {
             c_record_store: store.clone(),
             sock2index: Sock2Index::new(),
-            connections: vec![Connection::new(store); MAX_CONNECTIONS],
+            connections: vec![Connection::new(); MAX_CONNECTIONS],
             free_slots: (1..MAX_CONNECTIONS).collect(), // we use index 0 to indicate unused slots
         }
     }
 
-
+    #[inline]
     pub fn get_mut(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
         let index = self.sock2index.get(sock);
         if index.is_some() {
@@ -428,6 +433,7 @@ impl ConnectionManagerS {
         }
     }
 
+    #[inline]
     pub fn get_mut_or_insert(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
         {
             let index = self.sock2index.get(sock);
@@ -436,41 +442,36 @@ impl ConnectionManagerS {
             }
         }
         // create
-        let index = self.free_slots.pop_front();
-        if index.is_some() {
-            //self.sock2index.insert(*sock, index.unwrap());
-            self.sock2index.insert(*sock, index.unwrap() as u16);
-            let c = &mut self.connections[index.unwrap()];
-            c.initialize(Some(*sock), 0, TcpRole::Server);
-            Some(c)
-        } else {
-            None // out of resources
-        }
+        self.insert(sock)
     }
 
+    #[inline]
     pub fn insert(&mut self, sock: &(u32, u16)) -> Option<&mut Connection> {
         let index = self.free_slots.pop_front();
         if index.is_some() {
             self.sock2index.insert(*sock, index.unwrap() as u16);
             let c = &mut self.connections[index.unwrap()];
-            c.initialize(Some(*sock), 0, TcpRole::Server);
+            c.initialize(Some(*sock), 0, TcpRole::Server, Rc::clone(&self.c_record_store));
             Some(c)
         } else {
             None // out of resources
         }
     }
 
-    pub fn release_sock(&mut self, sock: &(u32, u16), time_adder: Option<&mut TimeAdder>) {
-        // only if it is in use, i.e. it has been not released already
-        let index = self.sock2index.remove(&sock);
-        self.free_slots.push_front(index.unwrap() as usize);
-        if time_adder.is_some() {
-            # [cfg(feature = "profiling")]
-                time_adder.unwrap().add_stamp(utils::rdtsc_unsafe());
+    #[inline]
+    pub fn release(&mut self, sock: &(u32, u16)) {
+        let index = self.sock2index.remove(sock);
+        if index.is_some() {
+            let c = &mut self.connections[index.unwrap() as usize];
+            if c.in_use() {
+                self.free_slots.push_front(index.unwrap() as usize);
+            }
+            // port==0 indicates an unused connection,
+            c.set_port(0u16);
+            c.release_conrec();
+            // we keep unused connection in port2con table
         }
     }
-
-
 
     //TODO allow for more precise time out conditions, currently whole TCP connections are timed out, also we should send a RST
     pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<(u32, u16)>) {
@@ -498,32 +499,40 @@ impl ConnectionManagerS {
 
     #[inline]
     fn timeout(&mut self, sock: &(u32, u16)) {
+        // the borrow checker makes things a little bit cumbersome:
+        let mut in_use = false;
         {
-            let c = self.get_mut(sock);
-            if c.is_some() {
-                let c= c.unwrap();
+            let opt_c = self.get_mut(sock);
+            if let Some(c) = opt_c {
                 c.released(ReleaseCause::Timeout);
                 c.push_state(TcpState::Closed);
+                in_use = c.in_use();
+                // port==0 indicates an unused connection,
+                c.set_port(0u16);
+                c.release_conrec();
             }
         }
-        self.release_sock(sock, None);
+        if in_use {
+            let index = self.sock2index.remove(sock);
+            self.free_slots.push_front(index.unwrap() as usize);
+        }
     }
 
     pub fn fetch_c_records(&mut self) -> Option<RecordStore> {
         // we are "moving" the con_records out, and replace it with a new one
-        let new_store= Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
-        let new_store_clone = Rc::clone(&new_store);
-        let store=mem::replace(&mut self.c_record_store, new_store);
-        for mut c in &mut self.connections {
-            c.store= Rc::clone(&new_store_clone)
+        let new_store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
+        let store = mem::replace(&mut self.c_record_store, new_store);
+        let strong_count = Rc::strong_count(&store);
+        debug!("cm_s.fetch_c_records: strong_count= { }", strong_count);
+        if strong_count > 0 {
+            for c in &mut self.connections {
+                c.release_conrec();
+            }
         }
-        let strong_count= Rc::strong_count(&store);
-        let unwrapped= Rc::try_unwrap(store);
+        let unwrapped = Rc::try_unwrap(store);
         if unwrapped.is_ok() {
             Some(unwrapped.unwrap().into_inner())
-        }
-        else {
-            error!("cm_s.fetch_c_records: strong_count= { }" , strong_count);
+        } else {
             None
         }
     }

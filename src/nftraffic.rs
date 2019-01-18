@@ -552,7 +552,7 @@ pub fn setup_generator(
         // if set by the following tcp state machine,
         // the port/connection becomes released/ready afterwards
         // this is cumbersome, but we must make the  borrow checker happy
-        let mut release_connection_c = None;
+        let mut b_release_connection_c = false;
         let mut b_release_connection_s = false;
         let mut ready_connection = None;
         let server_listen_port = cm_c.special_port();
@@ -668,7 +668,6 @@ pub fn setup_generator(
                     None => warn!("no state for this packet on server port"),
                     Some(mut c) => {
                         let old_s_state = c.last_state().clone();
-
                         //check seqn
                         if old_s_state != TcpState::Listen && hs.tcp.seq_num() != c.ackn_nxt {
                             let diff = hs.tcp.seq_num() as i64 - c.ackn_nxt as i64;
@@ -782,94 +781,95 @@ pub fn setup_generator(
                 // check that flow steering worked:
                 if !cm_c.owns_tcp_port(client_port) {
                     error!("flow steering failed {}", hs.tcp);
-                    assert!(cm_c.owns_tcp_port(hs.tcp.dst_port()));
                 }
-                let mut c = cm_c.get_mut_by_port(hs.tcp.dst_port());
+                let mut c = cm_c.get_mut_by_port(client_port);
                 #[cfg(feature = "profiling")]
                     time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
-                if c.is_some() {
-                    let mut c = c.as_mut().unwrap();
-                    //debug!("incoming packet for connection {}", c);
-                    let old_c_state = c.last_state().clone();
-
-                    //check seqn
-                    if old_c_state != TcpState::SynSent && hs.tcp.seq_num() != c.ackn_nxt {
-                        let diff = hs.tcp.seq_num() as i64 - c.ackn_nxt as i64;
-                        if diff > 0 {
-                            warn!(
-                                "{} unexpected sequence number (packet loss?) in state {:?}, seqn differs by {}",
-                                thread_id, old_c_state, diff
-                            );
-                        } else {
-                            debug!("{} state= {:?}, diff= {}, tcp= {}", thread_id, old_c_state, diff, hs.tcp);
-                        }
-                    } else if hs.tcp.ack_flag() && hs.tcp.syn_flag() {
-                        group_index = 1;
-                        counter_to[TcpStatistics::RecvSynAck] += 1;
-                        if old_c_state == TcpState::SynSent {
-                            c.con_established();
-                            ready_connection = Some(c.port());
-                            debug!(
-                                "{} connection for port {} to DUT ({:?}) established ",
-                                thread_id,
-                                c.port(),
-                                src_sock
-                            );
-                            synack_received(p, &mut c, &mut hs);
-                            counter_to[TcpStatistics::SentSynAck2] += 1;
-                        } else if old_c_state == TcpState::Established {
-                            synack_received(p, &mut c, &mut hs);
-                            counter_to[TcpStatistics::SentSynAck2] += 1;
-                        } else {
-                            warn!("{} received SYN-ACK in wrong state: {:?}", thread_id, old_c_state);
-                            group_index = 0;
-                        } // ignore the SynAck
-                    } else if hs.tcp.fin_flag() {
-                        if old_c_state >= TcpState::FinWait1 {
-                            active_close(p, c, &mut hs, &mut counter_to, &old_c_state);
-                            group_index = 1;
-                        } else {
-                            passive_close(p, c, &mut hs, &thread_id, &mut counter_to);
-                            group_index = 1;
-                        }
-                        #[cfg(feature = "profiling")]
-                            time_adders[7].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
-                    } else if hs.tcp.rst_flag() {
-                        counter_to[TcpStatistics::RecvRst] += 1;
-                        c.push_state(TcpState::Closed);
-                        c.released(ReleaseCause::PassiveRst);
-                        // release connection in the next block
-                        release_connection_c = Some(c.port());
-                    } else if old_c_state == TcpState::LastAck && hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
-                        counter_to[TcpStatistics::RecvAck4Fin] += 1;
-                        c.push_state(TcpState::Closed);
-                        c.released(ReleaseCause::PassiveClose);
-                        // release connection in the next block
-                        release_connection_c = Some(c.port());
-                    } else if hs.tcp.ack_flag() {
-                        // ACKs to payload packets
-                    } else {
-                        counter_to[TcpStatistics::Unexpected] += 1;
+                match c {
+                    None => {
                         warn!(
-                            "{} unexpected TCP packet on port {} in client state {:?}, sending to KNI i/f: {}",
+                            "{} engine has no state for {}:{}, sending to KNI i/f",
                             thread_id,
-                            hs.tcp.dst_port(),
-                            c.states(),
+                            hs.ip,
                             hs.tcp,
+                            //Ipv4Addr::from(hs.ip.dst()),
+                            // hs.tcp.dst_port(),
                         );
+                        // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
                         group_index = 2;
+                    },
+                    Some(mut c) => {
+                        //debug!("incoming packet for connection {}", c);
+                        let old_c_state = c.last_state().clone();
+
+                        //check seqn
+                        if old_c_state != TcpState::SynSent && hs.tcp.seq_num() != c.ackn_nxt {
+                            let diff = hs.tcp.seq_num() as i64 - c.ackn_nxt as i64;
+                            if diff > 0 {
+                                warn!(
+                                    "{} unexpected sequence number (packet loss?) in state {:?}, seqn differs by {}",
+                                    thread_id, old_c_state, diff
+                                );
+                            } else {
+                                debug!("{} state= {:?}, diff= {}, tcp= {}", thread_id, old_c_state, diff, hs.tcp);
+                            }
+                        } else if hs.tcp.ack_flag() && hs.tcp.syn_flag() {
+                            group_index = 1;
+                            counter_to[TcpStatistics::RecvSynAck] += 1;
+                            if old_c_state == TcpState::SynSent {
+                                c.con_established();
+                                ready_connection = Some(c.port());
+                                debug!(
+                                    "{} connection for port {} to DUT ({:?}) established ",
+                                    thread_id,
+                                    c.port(),
+                                    src_sock
+                                );
+                                synack_received(p, &mut c, &mut hs);
+                                counter_to[TcpStatistics::SentSynAck2] += 1;
+                            } else if old_c_state == TcpState::Established {
+                                synack_received(p, &mut c, &mut hs);
+                                counter_to[TcpStatistics::SentSynAck2] += 1;
+                            } else {
+                                warn!("{} received SYN-ACK in wrong state: {:?}", thread_id, old_c_state);
+                                group_index = 0;
+                            } // ignore the SynAck
+                        } else if hs.tcp.fin_flag() {
+                            if old_c_state >= TcpState::FinWait1 {
+                                active_close(p, c, &mut hs, &mut counter_to, &old_c_state);
+                                group_index = 1;
+                            } else {
+                                passive_close(p, c, &mut hs, &thread_id, &mut counter_to);
+                                group_index = 1;
+                            }
+                            #[cfg(feature = "profiling")]
+                                time_adders[7].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                        } else if hs.tcp.rst_flag() {
+                            counter_to[TcpStatistics::RecvRst] += 1;
+                            c.push_state(TcpState::Closed);
+                            c.released(ReleaseCause::PassiveRst);
+                            // release connection in the next block
+                            b_release_connection_c = true;
+                        } else if old_c_state == TcpState::LastAck && hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
+                            counter_to[TcpStatistics::RecvAck4Fin] += 1;
+                            c.push_state(TcpState::Closed);
+                            c.released(ReleaseCause::PassiveClose);
+                            // release connection in the next block
+                            b_release_connection_c = true;
+                        } else if hs.tcp.ack_flag() {
+                            // ACKs to payload packets
+                        } else {
+                            counter_to[TcpStatistics::Unexpected] += 1;
+                            warn!(
+                                "{} unexpected TCP packet on port {} in client state {:?}, sending to KNI i/f: {}",
+                                thread_id,
+                                hs.tcp.dst_port(),
+                                c.states(),
+                                hs.tcp,
+                            );
+                            group_index = 2;
+                        }
                     }
-                } else {
-                    warn!(
-                        "{} engine has no state for {}:{}, sending to KNI i/f",
-                        thread_id,
-                        hs.ip,
-                        hs.tcp,
-                        //Ipv4Addr::from(hs.ip.dst()),
-                        // hs.tcp.dst_port(),
-                    );
-                    // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
-                    group_index = 2;
                 }
             }
             (_, _) => assert!(false), // should never happen
@@ -878,18 +878,14 @@ pub fn setup_generator(
         // here we check if we shall release the connection state,
         // need this cumbersome way because of borrow checker for the connection managers
         if b_release_connection_s {
-            #[cfg(feature = "profiling")]
-                {
-                    time_adders[10].start(timestamp_entry);
-                    cm_s.release_sock(&src_sock, Some(&mut time_adders[10]));
-                }
-            //time_adders[10].add(utils::rdtsc_unsafe() - timestamp_entry);
+            cm_s.release(&src_sock);
+            # [cfg(feature = "profiling")]
+                time_adders[10].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
         }
-        if let Some(sport) = release_connection_c {
-            //debug!("releasing port {}", sport);
-            cm_c.release_port(sport);
+        if b_release_connection_c {
+            cm_c.release(hs.tcp.dst_port());
             #[cfg(feature = "profiling")]
-                time_adders[9].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                time_adders[9].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
         }
         if let Some(sport) = ready_connection {
             trace!("{} connection on  port {} is ready", thread_id, sport);
