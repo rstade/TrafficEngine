@@ -33,8 +33,13 @@ use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4};
 use netfcts::tasks::{private_etype, PacketInjector, TickGenerator, install_task};
 use netfcts::timer_wheel::TimerWheel;
+use netfcts::ConRecordOperations;
 
 const MIN_FRAME_SIZE: usize = 60;
+
+const TIMER_WHEEL_RESOLUTION_MS: u64 = 10;
+const TIMER_WHEEL_SLOTS: usize = 1000;
+const TIMER_WHEEL_SLOT_CAPACITY: usize = 2500;
 
 pub fn setup_generator(
     core: i32,
@@ -63,8 +68,17 @@ pub fn setup_generator(
     let mut cm_s = ConnectionManagerS::new();
 
     let timeouts = Timeouts::default_or_some(&engine_config.timeouts);
-    let mut wheel_c = TimerWheel::new(128, system_data.cpu_clock / 10, 128);
-    let mut wheel_s = TimerWheel::new(128, system_data.cpu_clock / 10, 128);
+    //tick resolution= 10ms,
+    let mut wheel_c = TimerWheel::new(
+        TIMER_WHEEL_SLOTS,
+        system_data.cpu_clock * TIMER_WHEEL_RESOLUTION_MS / 1000,
+        TIMER_WHEEL_SLOT_CAPACITY,
+    );
+    let mut wheel_s = TimerWheel::new(
+        TIMER_WHEEL_SLOTS,
+        system_data.cpu_clock * TIMER_WHEEL_RESOLUTION_MS / 1000,
+        TIMER_WHEEL_SLOT_CAPACITY,
+    );
     debug!(
         "{} wheel cycle= {} millis",
         pipeline_id,
@@ -89,7 +103,7 @@ pub fn setup_generator(
     let mut counter_to = TcpCounter::new();
     let mut counter_from = TcpCounter::new();
     #[cfg(feature = "profiling")]
-        let mut rx_tx_stats = Vec::with_capacity(10000);
+    let mut rx_tx_stats = Vec::with_capacity(10000);
 
     // we create SYN and Payload packets and merge them with the upstream coming from the pci i/f
     // the destination port of the created tcp packets is used as discriminator in the pipeline (dst_port 1 is for SYN packet generation)
@@ -105,7 +119,7 @@ pub fn setup_generator(
             system_data.cpu_clock / engine_config.cps_limit() * 32,
             1u16,
         )
-            .set_start_delay(system_data.cpu_clock / 100),
+        .set_start_delay(system_data.cpu_clock / 100),
     );
     tx.send(MessageFrom::Task(pipeline_id.clone(), injector_uuid, TaskType::TcpGenerator))
         .unwrap();
@@ -123,7 +137,7 @@ pub fn setup_generator(
             system_data.cpu_clock / engine_config.cps_limit() * 32,
             2u16,
         )
-            .set_start_delay(system_data.cpu_clock / 100),
+        .set_start_delay(system_data.cpu_clock / 100),
     );
     tx.send(MessageFrom::Task(pipeline_id.clone(), injector_uuid, TaskType::TcpGenerator))
         .unwrap();
@@ -132,7 +146,7 @@ pub fn setup_generator(
     // set up the generator producing timer tick packets with our private EtherType
     let (producer_timerticks, consumer_timerticks) = new_mpsc_queue_pair();
     let tick_generator = TickGenerator::new(producer_timerticks, &me, system_data.cpu_clock / 100); // 10 ms
-    assert!(wheel_c.resolution() > tick_generator.tick_length());
+    assert!(wheel_c.resolution() >= tick_generator.tick_length());
     let wheel_tick_reduction_factor = wheel_c.resolution() / tick_generator.tick_length();
     let mut ticks = 0;
     let uuid_task = install_task(sched, "TickGenerator", tick_generator);
@@ -157,17 +171,17 @@ pub fn setup_generator(
     let rxq = pci.rxq();
     let csum_offload = pci.port.csum_offload();
     #[cfg(feature = "profiling")]
-        let tx_stats = pci.tx_stats();
+    let tx_stats = pci.tx_stats();
     #[cfg(feature = "profiling")]
-        let rx_stats = pci.rx_stats();
+    let rx_stats = pci.rx_stats();
     let uuid_l4groupby = Uuid::new_v4();
     let uuid_l4groupby_clone = uuid_l4groupby.clone();
     let pipeline_id_clone = pipeline_id.clone();
 
     #[cfg(feature = "profiling")]
-        let sample_size = nr_connections as u64 / 2;
+    let sample_size = nr_connections as u64 / 2;
     #[cfg(feature = "profiling")]
-        let mut time_adders = [
+    let mut time_adders = [
         TimeAdder::new("cmanager_c", sample_size * 2),
         TimeAdder::new("s_recv_syn", sample_size),
         TimeAdder::new("s_recv_syn_ack2", sample_size),
@@ -297,7 +311,6 @@ pub fn setup_generator(
         #[inline]
         fn syn_received<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState) {
             c.push_state(TcpState::SynReceived);
-            c.dut_mac = h.mac.clone();
             c.set_dut_sock((h.ip.src(), h.tcp.src_port()));
             // debug!("checksum in = {:X}",p.get_header().checksum());
             remove_tcp_options(p, h);
@@ -351,7 +364,7 @@ pub fn setup_generator(
                 p.set_l2_len(mem::size_of::<MacHeader>() as u64);
                 p.set_l3_len(mem::size_of::<IpHeader>() as u64);
                 p.set_l4_len(mem::size_of::<TcpHeader>() as u64);
-                //debug!("l234len = {}, {}, {}, ol_flags= 0x{:X}, validate= {}", p.l2_len(), p.l3_len(), p.l4_len(), p.ol_flags(), p.validate_tx_offload() );
+            //debug!("l234len = {}, {}, {}, ol_flags= 0x{:X}, validate= {}", p.l2_len(), p.l3_len(), p.l4_len(), p.ol_flags(), p.validate_tx_offload() );
             } else {
                 h.ip.update_checksum();
                 update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
@@ -501,7 +514,7 @@ pub fn setup_generator(
         // *****  the closure starts here with processing
 
         #[cfg(feature = "profiling")]
-            let timestamp_entry = utils::rdtsc_unsafe();
+        let timestamp_entry = utils::rdtsc_unsafe();
 
         let pipeline_ip = cm_c.ip();
         let tcp_port_base = cm_c.tcp_port_base();
@@ -555,7 +568,7 @@ pub fn setup_generator(
         let mut b_release_connection_c = false;
         let mut b_release_connection_s = false;
         let mut ready_connection = None;
-        let server_listen_port = cm_c.special_port();
+        let server_listen_port = cm_c.listen_port();
 
         // check if we got a packet from generator
         match (hs.mac.etype(), hs.tcp.dst_port()) {
@@ -573,10 +586,11 @@ pub fn setup_generator(
                             &mut counter_to[TcpStatistics::SentSyn],
                         );
                         c.push_state(TcpState::SynSent);
-                        wheel_c.schedule(&(timeouts.established.unwrap() * system_data.cpu_clock / 1000), c.port());
+                        c.wheel_slot_and_index =
+                            wheel_c.schedule(&(timeouts.established.unwrap() * system_data.cpu_clock / 1000), c.port());
                         group_index = 1;
                         #[cfg(feature = "profiling")]
-                            time_adders[4].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                        time_adders[4].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                     }
                 } else {
                     if syn_injector_runs() {
@@ -586,7 +600,7 @@ pub fn setup_generator(
             }
             // payload injection
             (PRIVATE_ETYPE_PACKET, 2) => {
-                let mut cdata = CData::new(SocketAddrV4::new(Ipv4Addr::from(cm_c.ip()), cm_c.special_port()), 0, 0);
+                let mut cdata = CData::new(SocketAddrV4::new(Ipv4Addr::from(cm_c.ip()), cm_c.listen_port()), 0, 0);
                 if let Some(c) = cm_c.get_ready_connection() {
                     cdata.client_port = c.port();
                     cdata.uuid = c.get_uid();
@@ -595,7 +609,7 @@ pub fn setup_generator(
                     counter_to[TcpStatistics::Payload] += 1;
                     group_index = 1;
                     #[cfg(feature = "profiling")]
-                        time_adders[5].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                    time_adders[5].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                 } else {
                     if payload_injector_runs() {
                         payload_injector_stop();
@@ -610,7 +624,7 @@ pub fn setup_generator(
                 match rx.try_recv() {
                     Ok(MessageTo::FetchCounter) => {
                         #[cfg(feature = "profiling")]
-                            tx_clone
+                        tx_clone
                             .send(MessageFrom::Counter(
                                 pipeline_id_clone.clone(),
                                 counter_to.clone(),
@@ -619,7 +633,7 @@ pub fn setup_generator(
                             ))
                             .unwrap();
                         #[cfg(not(feature = "profiling"))]
-                            tx_clone
+                        tx_clone
                             .send(MessageFrom::Counter(
                                 pipeline_id_clone.clone(),
                                 counter_to.clone(),
@@ -645,7 +659,7 @@ pub fn setup_generator(
                     cm_s.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_s);
                 }
                 #[cfg(feature = "profiling")]
-                    rx_tx_stats.push((
+                rx_tx_stats.push((
                     utils::rdtsc_unsafe(),
                     rx_stats.stats.load(Ordering::Relaxed),
                     tx_stats.stats.load(Ordering::Relaxed),
@@ -654,11 +668,14 @@ pub fn setup_generator(
             (ETYPE_IPV4, dst_port) if dst_port == server_listen_port => {
                 //server side
                 let mut opt_c = if hs.tcp.syn_flag() {
-                    debug!("{} got SYN with src = {:?} on server listen port 0x{:x}", thread_id, src_sock, server_listen_port);
+                    debug!(
+                        "{} got SYN with src = {:?} on server listen port 0x{:x}",
+                        thread_id, src_sock, server_listen_port
+                    );
                     counter_from[TcpStatistics::RecvSyn] += 1;
                     let c = cm_s.get_mut_or_insert(&src_sock);
                     #[cfg(feature = "profiling")]
-                        time_adders[11].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                    time_adders[11].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                     c
                 } else {
                     cm_s.get_mut(&src_sock)
@@ -685,14 +702,14 @@ pub fn setup_generator(
                                 // replies with a SYN-ACK to client:
                                 syn_received(p, c, &mut hs);
                                 c.set_server_index(rxq as usize); // we misuse this field for the queue number
-                                wheel_s.schedule(
+                                c.wheel_slot_and_index = wheel_s.schedule(
                                     &(timeouts.established.unwrap() * system_data.cpu_clock / 1000),
                                     c.get_dut_sock().unwrap(),
                                 );
                                 counter_from[TcpStatistics::SentSynAck] += 1;
                                 group_index = 1;
                                 #[cfg(feature = "profiling")]
-                                    time_adders[1].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[1].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                             } else {
                                 warn!("{} received SYN in state {:?}", thread_id, c.states());
                             }
@@ -710,7 +727,7 @@ pub fn setup_generator(
                                 group_index = 1;
                             }
                             #[cfg(feature = "profiling")]
-                                time_adders[8].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                            time_adders[8].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                         } else if hs.tcp.rst_flag() {
                             trace!("received RST");
                             counter_from[TcpStatistics::RecvRst] += 1;
@@ -725,7 +742,7 @@ pub fn setup_generator(
                                     counter_from[TcpStatistics::RecvSynAck2] += 1;
                                     debug!("{} connection from DUT ({:?}) established", thread_id, src_sock);
                                     #[cfg(feature = "profiling")]
-                                        time_adders[2].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                    time_adders[2].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                                 }
                                 TcpState::LastAck => {
                                     // received final ack in passive close
@@ -771,7 +788,7 @@ pub fn setup_generator(
                                 c.ackn_nxt = hs.tcp.seq_num().wrapping_add(hs.tcp_payload_len() as u32);
                             }
                             #[cfg(feature = "profiling")]
-                                time_adders[3].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                            time_adders[3].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                         }
                     }
                 }
@@ -784,7 +801,7 @@ pub fn setup_generator(
                 }
                 let mut c = cm_c.get_mut_by_port(client_port);
                 #[cfg(feature = "profiling")]
-                    time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                 match c {
                     None => {
                         warn!(
@@ -797,7 +814,7 @@ pub fn setup_generator(
                         );
                         // we send this to KNI which handles out-of-order TCP, e.g. by sending RST
                         group_index = 2;
-                    },
+                    }
                     Some(mut c) => {
                         //debug!("incoming packet for connection {}", c);
                         let old_c_state = c.last_state().clone();
@@ -843,7 +860,7 @@ pub fn setup_generator(
                                 group_index = 1;
                             }
                             #[cfg(feature = "profiling")]
-                                time_adders[7].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                            time_adders[7].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                         } else if hs.tcp.rst_flag() {
                             counter_to[TcpStatistics::RecvRst] += 1;
                             c.push_state(TcpState::Closed);
@@ -878,14 +895,14 @@ pub fn setup_generator(
         // here we check if we shall release the connection state,
         // need this cumbersome way because of borrow checker for the connection managers
         if b_release_connection_s {
-            cm_s.release(&src_sock);
-            # [cfg(feature = "profiling")]
-                time_adders[10].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+            cm_s.release(&src_sock, &mut wheel_s);
+            #[cfg(feature = "profiling")]
+            time_adders[10].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
         }
         if b_release_connection_c {
-            cm_c.release(hs.tcp.dst_port());
+            cm_c.release(hs.tcp.dst_port(), &mut wheel_c);
             #[cfg(feature = "profiling")]
-                time_adders[9].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+            time_adders[9].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
         }
         if let Some(sport) = ready_connection {
             trace!("{} connection on  port {} is ready", thread_id, sport);
@@ -895,7 +912,7 @@ pub fn setup_generator(
                 payload_injector_start();
             }
             #[cfg(feature = "profiling")]
-                time_adders[6].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+            time_adders[6].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
         }
         do_ttl(&mut hs, &p);
         group_index
