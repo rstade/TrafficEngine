@@ -14,9 +14,16 @@ TrafficEngine builds on [Netbricks](https://github.com/NetSys/NetBricks) which i
 
 _**TrafficEngine Installation**_
 
-First install NetBricks. TrafficEngine needs the branch e2d2-rstade from the fork at https://github.com/rstade/Netbricks. The required NetBricks version is tagged (starting with v0.2.0). Install NetBricks locally on your (virtual) machine by following the description of NetBricks. The (relative) installation path of e2d2 needs to be updated in the dependency section of Cargo.toml of TrafficEngine. 
+First install NetBricks. TrafficEngine needs the branch e2d2-rstade from the fork at https://github.com/rstade/Netbricks. 
+The required NetBricks version is tagged (starting with v0.2.0). 
+Install NetBricks locally on your (virtual) machine by following the description of NetBricks. 
+The installation path of e2d2 needs to be updated in the dependency section of Cargo.toml of TrafficEngine. 
 
 Note, that a local installation of NetBricks is necessary as it includes DPDK and some C-libraries for interfacing the Rust code of NetBricks with the DPDK. As we need DPDK kernel modules, DPDK needs to be re-compiled each time the kernel version changes. This can be done with the script [build.sh](https://github.com/rstade/NetBricks/blob/e2d2-rstade/build.sh) of NetBricks. Note also that the Linux linker _ld_ needs to be made aware of the location of the .so libraries created by NetBricks. This can be solved using _ldconfig_.
+
+Secondly, TrafficEngine depends on the crate [netfcts](https://github.com/rstade/netfcts). 
+netfcts is an extension to NetBricks with helper functions and data structures, 
+and needs to be build using the locally installed NetBricks to ensure consistent dependencies.
 
 The network interfaces of the test machine need to be prepared (see [prepNet.sh](https://github.com/silverengine-de/proxyengine/blob/master/prepNet.sh)): 
 
@@ -52,7 +59,7 @@ Our test scenario is as follows:
 * After the client has setup the TCP connection, it sends a small payload packet to the server. After receiving the payload the server side release the TCP connection. In total we exchange seven packets per connection. 
 * The same TrafficEngine instance operates concurrently as client and as server. Therefore when comparing our cps figures with the cps of a TCP server our figures can be approximately doubled. 
 * Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache and a recent Centos 7.5 real-time kernel, e.g. from repository:  http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. We also performed the basic tuning steps to isolate the cores which are running our working threads. The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md).
-* Each test run sets up and releases 48000 connections per pipeline.
+* Each test run sets up and releases 200,000 connections per pipeline.
 
 The following figures shows first results for the achieved connections per second in dependence of the used cores.
 

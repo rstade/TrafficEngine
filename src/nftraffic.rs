@@ -8,14 +8,12 @@ use e2d2::queues::{new_mpsc_queue_pair, new_mpsc_queue_pair_with_size};
 use e2d2::headers::EndOffset;
 use e2d2::common::EmptyMetadata;
 use e2d2::utils;
-use e2d2::native::zcsi::ipv4_phdr_chksum;
 
 use std::sync::mpsc::{Sender, channel};
 use std::sync::Arc;
 use std::net::{SocketAddrV4, Ipv4Addr};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::mem;
 
 use uuid::Uuid;
 //use serde_json;
@@ -34,11 +32,16 @@ use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4};
 use netfcts::tasks::{private_etype, PacketInjector, TickGenerator, install_task};
 use netfcts::timer_wheel::TimerWheel;
 use netfcts::ConRecordOperations;
+use netfcts::HeaderState;
+use netfcts::prepare_checksum_and_ttl;
+use netfcts::set_header;
+use netfcts::remove_tcp_options;
+use netfcts::make_reply_packet;
 
 const MIN_FRAME_SIZE: usize = 60;
 
 const TIMER_WHEEL_RESOLUTION_MS: u64 = 10;
-const TIMER_WHEEL_SLOTS: usize = 1000;
+const TIMER_WHEEL_SLOTS: usize = 1001;
 const TIMER_WHEEL_SLOT_CAPACITY: usize = 2500;
 
 pub fn setup_generator(
@@ -67,8 +70,8 @@ pub fn setup_generator(
     let mut cm_c = ConnectionManagerC::new(pipeline_id.clone(), pci.clone(), l4flow_for_this_core);
     let mut cm_s = ConnectionManagerS::new();
 
-    let timeouts = Timeouts::default_or_some(&engine_config.timeouts);
-    //tick resolution= 10ms,
+    let mut timeouts = Timeouts::default_or_some(&engine_config.timeouts);
+
     let mut wheel_c = TimerWheel::new(
         TIMER_WHEEL_SLOTS,
         system_data.cpu_clock * TIMER_WHEEL_RESOLUTION_MS / 1000,
@@ -80,10 +83,22 @@ pub fn setup_generator(
         TIMER_WHEEL_SLOT_CAPACITY,
     );
     debug!(
-        "{} wheel cycle= {} millis",
+        "{} wheel cycle= {} millis, cpu-clock= {}",
         pipeline_id,
-        wheel_c.get_max_timeout_cycles() / system_data.cpu_clock * 1000
+        wheel_c.get_max_timeout_cycles() * 1000 / system_data.cpu_clock,
+        system_data.cpu_clock,
     );
+
+    // check that we do not overflow the wheel:
+    if timeouts.established.is_some() {
+        let timeout=timeouts.established.unwrap();
+        if timeout > wheel_c.get_max_timeout_cycles() {
+            warn!("timeout defined in configuration file overflows timer wheel: reset to {} millis",
+                  wheel_c.get_max_timeout_cycles() * 1000 / system_data.cpu_clock);
+            timeouts.established= Some(wheel_c.get_max_timeout_cycles());
+        }
+    }
+
 
     // setting up a a reverse message channel between this pipeline and the main program thread
     debug!("{} setting up reverse channel", pipeline_id);
@@ -183,7 +198,7 @@ pub fn setup_generator(
     #[cfg(feature = "profiling")]
     let mut time_adders = [
         TimeAdder::new("cmanager_c", sample_size * 2),
-        TimeAdder::new("s_recv_syn", sample_size),
+        TimeAdder::new_with_warm_up("s_recv_syn", sample_size, 100),
         TimeAdder::new("s_recv_syn_ack2", sample_size),
         TimeAdder::new("s_recv_payload", sample_size),
         TimeAdder::new("c_sent_syn", sample_size),
@@ -225,63 +240,7 @@ pub fn setup_generator(
 
         let payload_injector_runs = || payload_injector_ready_flag.load(Ordering::SeqCst);
 
-        struct HeaderState<'a> {
-            mac: &'a mut MacHeader,
-            ip: &'a mut IpHeader,
-            tcp: &'a mut TcpHeader,
-        }
 
-        impl<'a> HeaderState<'a> {
-            #[inline]
-            fn set_server_socket(&mut self, ip: u32, port: u16) {
-                self.ip.set_dst(ip);
-                self.tcp.set_dst_port(port);
-            }
-
-            #[inline]
-            fn tcp_payload_len(&self) -> usize {
-                self.ip.length() as usize - self.tcp.offset() - self.ip.ihl() as usize * 4
-            }
-        }
-
-        #[inline]
-        fn do_ttl<M: Sized + Send>(h: &mut HeaderState, p: &Packet<TcpHeader, M>) {
-            let ttl = h.ip.ttl();
-            if ttl >= 1 {
-                h.ip.set_ttl(ttl - 1);
-            }
-            if !p.tcp_checksum_tx_offload() {
-                h.ip.update_checksum();
-            }
-        }
-
-        #[inline]
-        fn make_reply_packet(h: &mut HeaderState, inc: u32) {
-            let smac = h.mac.src;
-            let dmac = h.mac.dst;
-            let sip = h.ip.src();
-            let dip = h.ip.dst();
-            let sport = h.tcp.src_port();
-            let dport = h.tcp.dst_port();
-            h.mac.set_smac(&dmac);
-            h.mac.set_dmac(&smac);
-            h.ip.set_dst(sip);
-            h.ip.set_src(dip);
-            h.tcp.set_src_port(dport);
-            h.tcp.set_dst_port(sport);
-            h.tcp.set_ack_flag();
-            let ack_num = h.tcp.seq_num().wrapping_add(h.tcp_payload_len() as u32 + inc);
-            h.tcp.set_ack_num(ack_num);
-        }
-
-        #[inline]
-        fn set_header(server: &L234Data, port: u16, h: &mut HeaderState, me: &L234Data) {
-            h.mac.set_dmac(&server.mac);
-            h.mac.set_smac(&me.mac);
-            h.set_server_socket(server.ip, server.port);
-            h.ip.set_src(me.ip);
-            h.tcp.set_src_port(port);
-        }
         /*
         #[inline]
         pub fn tcpip_payload_size<M: Sized + Send>(p: &Packet<TcpHeader, M>) -> u16 {
@@ -291,22 +250,6 @@ pub fn setup_generator(
         }
         */
 
-        // remove tcp options for SYN and SYN-ACK,
-        // pre-requisite: no payload exists, because any payload is not shifted up
-        #[inline]
-        fn remove_tcp_options<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h: &mut HeaderState) {
-            let old_offset = h.tcp.offset() as u16;
-            if old_offset > 20 {
-                debug!("trimming tcp-options by { } bytes", old_offset - 20);
-                h.tcp.set_data_offset(5u8);
-                // minimum mbuf data length is 60 bytes
-                h.ip.trim_length_by(old_offset - 20u16);
-                //                        let trim_by = min(p.data_len() - 60usize, (old_offset - 20u16) as usize);
-                //                        82599 does padding itself !?
-                let trim_by = old_offset - 20;
-                p.trim_payload_size(trim_by as usize);
-            }
-        }
 
         #[inline]
         fn syn_received<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState) {
@@ -320,7 +263,7 @@ pub fn setup_generator(
             h.tcp.set_seq_num(c.seqn_nxt);
             c.ackn_nxt = h.tcp.ack_num();
             c.seqn_nxt = c.seqn_nxt.wrapping_add(1);
-            prepare_checksum(p, h);
+            prepare_checksum_and_ttl(p, h);
             trace!("(SYN-)ACK to client, L3: { }, L4: { }", h.ip, h.tcp);
         }
 
@@ -330,7 +273,7 @@ pub fn setup_generator(
             c.ackn_nxt = h.tcp.ack_num();
             h.tcp.unset_syn_flag();
             h.tcp.set_seq_num(c.seqn_nxt);
-            prepare_checksum(p, h);
+            prepare_checksum_and_ttl(p, h);
         }
 
         #[inline]
@@ -350,26 +293,7 @@ pub fn setup_generator(
             h.tcp.set_fin_flag();
             c.seqn_nxt = c.seqn_nxt.wrapping_add(1);
             strip_payload(p, h);
-            prepare_checksum(p, h);
-        }
-
-        #[inline]
-        fn prepare_checksum<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, h: &mut HeaderState) {
-            if p.tcp_checksum_tx_offload() {
-                h.ip.set_csum(0);
-                unsafe {
-                    let csum = ipv4_phdr_chksum(h.ip, 0);
-                    h.tcp.set_checksum(csum);
-                }
-                p.set_l2_len(mem::size_of::<MacHeader>() as u64);
-                p.set_l3_len(mem::size_of::<IpHeader>() as u64);
-                p.set_l4_len(mem::size_of::<TcpHeader>() as u64);
-            //debug!("l234len = {}, {}, {}, ol_flags= 0x{:X}, validate= {}", p.l2_len(), p.l3_len(), p.l4_len(), p.ol_flags(), p.validate_tx_offload() );
-            } else {
-                h.ip.update_checksum();
-                update_tcp_checksum(p, h.ip.payload_size(0), h.ip.src(), h.ip.dst());
-                // debug!("checksum recalc = {:X}",p.get_header().checksum());
-            }
+            prepare_checksum_and_ttl(p, h);
         }
 
         #[inline]
@@ -384,7 +308,7 @@ pub fn setup_generator(
         ) {
             h.mac.set_etype(0x0800); // overwrite private ethertype tag
             c.set_server_index(*syn_counter as usize % servers.len());
-            set_header(&servers[c.server_index()], c.port(), h, me);
+            set_header(&servers[c.server_index()], c.port(), h, &me.mac, me.ip);
 
             //generate seq number:
             c.seqn_nxt = (utils::rdtsc_unsafe() << 8) as u32;
@@ -395,7 +319,7 @@ pub fn setup_generator(
             h.tcp.set_ack_num(0u32);
             h.tcp.unset_ack_flag();
             h.tcp.unset_psh_flag();
-            prepare_checksum(p, h);
+            prepare_checksum_and_ttl(p, h);
 
             *syn_counter += 1;
             if *syn_counter % 1000 == 0 {
@@ -413,7 +337,7 @@ pub fn setup_generator(
             payload: &[u8],
         ) {
             h.mac.set_etype(0x0800); // overwrite private ethertype tag
-            set_header(&servers[c.server_index()], c.port(), h, me);
+            set_header(&servers[c.server_index()], c.port(), h, &me.mac, me.ip);
             let sz = payload.len();
             let ip_sz = h.ip.length();
             p.add_to_payload_tail(sz).expect("insufficient tail room");
@@ -431,7 +355,7 @@ pub fn setup_generator(
                 debug!("padding with {} 0x0 bytes", n_padding_bytes);
                 p.add_padding(n_padding_bytes);
             }
-            prepare_checksum(p, h);
+            prepare_checksum_and_ttl(p, h);
         }
 
         #[inline]
@@ -457,7 +381,7 @@ pub fn setup_generator(
             h.tcp.set_ack_flag();
             h.tcp.set_seq_num(c.seqn_nxt);
             c.seqn_nxt = c.seqn_nxt.wrapping_add(1);
-            prepare_checksum(p, h);
+            prepare_checksum_and_ttl(p, h);
             counter[TcpStatistics::SentFinPssv] += 1;
             counter[TcpStatistics::SentAck4Fin] += 1;
         };
@@ -506,7 +430,7 @@ pub fn setup_generator(
             if h.tcp_payload_len() > 0 {
                 strip_payload(p, h);
             }
-            prepare_checksum(p, h);
+            prepare_checksum_and_ttl(p, h);
             counter[TcpStatistics::SentAck4Fin] += 1;
             tcp_closed
         };
@@ -601,9 +525,11 @@ pub fn setup_generator(
             // payload injection
             (PRIVATE_ETYPE_PACKET, 2) => {
                 let mut cdata = CData::new(SocketAddrV4::new(Ipv4Addr::from(cm_c.ip()), cm_c.listen_port()), 0, 0);
+                //trace!("{} payload injection packet received", thread_id);
                 if let Some(c) = cm_c.get_ready_connection() {
                     cdata.client_port = c.port();
                     cdata.uuid = c.get_uid();
+                    trace!("{} sending payload on port {}" , thread_id, cdata.client_port);
                     let bin_vec = serialize(&cdata).unwrap();
                     make_payload_packet(p, c, &mut hs, &me, &servers, &bin_vec);
                     counter_to[TcpStatistics::Payload] += 1;
@@ -643,6 +569,7 @@ pub fn setup_generator(
                             .unwrap();
                     }
                     Ok(MessageTo::FetchCRecords) => {
+                        trace!("{} got FetchCrecords" , thread_id);
                         tx_clone
                             .send(MessageFrom::CRecords(
                                 pipeline_id_clone.clone(),
@@ -659,11 +586,14 @@ pub fn setup_generator(
                     cm_s.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_s);
                 }
                 #[cfg(feature = "profiling")]
-                rx_tx_stats.push((
-                    utils::rdtsc_unsafe(),
-                    rx_stats.stats.load(Ordering::Relaxed),
-                    tx_stats.stats.load(Ordering::Relaxed),
-                ));
+                    {
+                        let tx_stats_now = tx_stats.stats.load(Ordering::Relaxed);
+                        let rx_stats_now = rx_stats.stats.load(Ordering::Relaxed);
+                        // only save changes
+                        if rx_tx_stats.last().is_none() || tx_stats_now != rx_tx_stats.last().unwrap().2 || rx_stats_now != rx_tx_stats.last().unwrap().1 {
+                            rx_tx_stats.push((utils::rdtsc_unsafe(), rx_stats_now, tx_stats_now));
+                        }
+                    }
             }
             (ETYPE_IPV4, dst_port) if dst_port == server_listen_port => {
                 //server side
@@ -805,8 +735,10 @@ pub fn setup_generator(
                 match c {
                     None => {
                         warn!(
-                            "{} engine has no state for {}:{}, sending to KNI i/f",
+                            "{} @ {} engine has no state for port {} ({}-{}), sending to KNI i/f",
                             thread_id,
+                            utils::rdtsc_unsafe().separated_string(),
+                            client_port,
                             hs.ip,
                             hs.tcp,
                             //Ipv4Addr::from(hs.ip.dst()),
@@ -905,7 +837,7 @@ pub fn setup_generator(
             time_adders[9].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
         }
         if let Some(sport) = ready_connection {
-            trace!("{} connection on  port {} is ready", thread_id, sport);
+            trace!("{} connection on port {} is ready", thread_id, sport);
             cm_c.set_ready_connection(sport);
             // if this is the first ready connection, we restart the injector, avoid accessing Atomic unnecessarily
             if cm_c.ready_connections() == 1 {
@@ -914,7 +846,6 @@ pub fn setup_generator(
             #[cfg(feature = "profiling")]
             time_adders[6].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
         }
-        do_ttl(&mut hs, &p);
         group_index
     };
 

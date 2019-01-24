@@ -72,6 +72,7 @@ impl ConRecordOperations for Connection {
 
     #[inline]
     fn release_conrec(&mut self) {
+        //trace!("releasing con record on port {}", self.port());
         self.con_rec = None;
         self.store = None;
     }
@@ -200,10 +201,8 @@ impl ConnectionManagerC {
     pub fn get_mut_by_port(&mut self, port: u16) -> Option<&mut Connection> {
         if self.owns_tcp_port(port) {
             let c = self.get_mut_con(&port);
-            // check if c has a port != 0 assigned
-            // otherwise it is released, as we keep released connections
-            // and just mark them as unused by assigning port 0
-            if c.port() != 0 {
+            // check if c is in use
+            if c.in_use() {
                 Some(c)
             } else {
                 None
@@ -247,6 +246,7 @@ impl ConnectionManagerC {
                 in_use = true;
                 c.released(ReleaseCause::Timeout);
                 c.push_state(TcpState::Closed);
+                debug!("timing out port {} at {:?}", port, c.wheel_slot_and_index);
                 // now we release the connection inline (cannot call self.release)
                 c.release_conrec();
             }
@@ -296,7 +296,7 @@ impl ConnectionManagerC {
         let store = mem::replace(&mut self.c_record_store, new_store);
         let strong_count = Rc::strong_count(&store);
         debug!("cm_s.fetch_c_records: strong_count= { }", strong_count);
-        if strong_count > 0 {
+        if strong_count > 1 {
             for c in &mut self.port2con {
                 c.release_conrec();
             }
@@ -325,6 +325,7 @@ impl ConnectionManagerC {
             match self.ready.pop_front() {
                 Some(port) => {
                     let c = &self.port2con[(port - self.tcp_port_base) as usize];
+                    trace!("found ready connection {}", if c.in_use() { c.port() } else { 0 } );
                     if c.in_use() && c.last_state() == TcpState::Established {
                         port_result = Some(port)
                     }
@@ -418,7 +419,7 @@ impl ConnectionManagerS {
 
     //TODO allow for more precise time out conditions, currently whole TCP connections are timed out, also we should send a RST
     pub fn release_timeouts(&mut self, now: &u64, wheel: &mut TimerWheel<(u32, u16)>) {
-        trace!("release_timeouts");
+        //trace!("cm server side: release_timeouts");
         loop {
             match wheel.tick(now) {
                 (Some(mut drain), more) => {
@@ -468,7 +469,7 @@ impl ConnectionManagerS {
         let store = mem::replace(&mut self.c_record_store, new_store);
         let strong_count = Rc::strong_count(&store);
         debug!("cm_s.fetch_c_records: strong_count= { }", strong_count);
-        if strong_count > 0 {
+        if strong_count > 1 {
             for c in &mut self.connections {
                 c.release_conrec();
             }

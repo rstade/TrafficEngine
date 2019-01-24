@@ -188,7 +188,7 @@ pub fn main() {
 
                 // start generator
                 mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-                thread::sleep(Duration::from_millis(500 as u64));
+                thread::sleep(Duration::from_millis(1000 as u64));
 
                 mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
                 thread::sleep(Duration::from_millis(100 as u64));

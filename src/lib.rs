@@ -7,7 +7,6 @@ extern crate log;
 extern crate e2d2;
 extern crate env_logger;
 extern crate fnv;
-extern crate rand;
 extern crate toml;
 extern crate separator;
 #[macro_use]
