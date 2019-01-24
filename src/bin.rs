@@ -188,7 +188,8 @@ pub fn main() {
 
                 // start generator
                 mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-                thread::sleep(Duration::from_millis(1000 as u64));
+                // use sufficient time for traffic engine to complete the run:
+                thread::sleep(Duration::from_millis(5000 as u64));
 
                 mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
                 thread::sleep(Duration::from_millis(100 as u64));
