@@ -32,10 +32,11 @@ use env_logger;
 //use serde_json;
 use separator::Separatable;
 use netfcts::{initialize_flowdirector, FlowSteeringMode};
+use netfcts::{ConRecord, HasTcpState};
 
 use read_config;
 use netfcts::system::get_mac_from_ifname;
-use netfcts::io::{print_tcp_counters};
+use netfcts::io::print_tcp_counters;
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
 use setup_pipelines;
@@ -165,8 +166,8 @@ pub fn run_test(test_type: TestType) {
                 }
                 context.start_schedulers();
 
-                let (mtx, mrx) = channel::<MessageFrom>();
-                let (reply_mtx, reply_mrx) = channel::<MessageTo>();
+                let (mtx, mrx) = channel::<MessageFrom<ConRecord>>();
+                let (reply_mtx, reply_mrx) = channel::<MessageTo<ConRecord>>();
 
                 let configuration_cloned = configuration.clone();
                 let mtx_clone = mtx.clone();
@@ -343,56 +344,58 @@ pub fn run_test(test_type: TestType) {
                 assert_ne!(con_records.len(), 0);
                 if test_type == TestType::Server {
                     for (p, (_, c_records)) in &con_records {
-                        debug!("Pipeline {}:", p);
-                        if c_records.len() > 0 {
-                            let mut completed_count = 0;
-                            let mut min = c_records.iter().last().unwrap();
-                            let mut max = min;
-                            c_records.iter().enumerate().for_each(|(i, c)| {
-                                let line = format!("{:6}: {}\n", i, c);
-                                f.write_all(line.as_bytes()).expect("cannot write c_records");
-                                if c.get_release_cause() == ReleaseCause::ActiveClose
-                                    && c.states().last().unwrap() == &TcpState::Closed
-                                {
-                                    completed_count += 1
-                                }
-                                if c.get_first_stamp().unwrap_or(u64::max_value())
-                                    < min.get_first_stamp().unwrap_or(u64::max_value())
-                                {
-                                    min = c
-                                }
-                                if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
-                                    max = c
-                                }
-                                if i == (c_records.len() - 1)
-                                    && min.get_first_stamp().is_some()
-                                    && max.get_last_stamp().is_some()
-                                {
-                                    let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                                    info!(
-                                        "total used cycles= {}, per connection = {}",
-                                        total.separated_string(),
-                                        (total / (i as u64 + 1)).separated_string()
-                                    );
-                                }
-                            });
-                            assert_eq!(completed_count, tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSyn]);
-                            assert_eq!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSyn],
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck]
-                            );
-                            assert_eq!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck],
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSynAck2]
-                            );
-                            assert!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFin] + tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFinPssv] <=
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentAck4Fin]
-                            );
-                            assert!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFinPssv] +  tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFin] <=
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
-                            );
+                        match c_records {
+                            Some(c_records) if c_records.len() > 0 => {
+                                let mut completed_count = 0;
+                                let mut min = c_records.iter().last().unwrap();
+                                let mut max = min;
+                                c_records.iter().enumerate().for_each(|(i, c)| {
+                                    let line = format!("{:6}: {}\n", i, c);
+                                    f.write_all(line.as_bytes()).expect("cannot write c_records");
+                                    if c.release_cause() == ReleaseCause::ActiveClose
+                                        && c.states().last().unwrap() == &TcpState::Closed
+                                    {
+                                        completed_count += 1
+                                    }
+                                    if c.get_first_stamp().unwrap_or(u64::max_value())
+                                        < min.get_first_stamp().unwrap_or(u64::max_value())
+                                    {
+                                        min = c
+                                    }
+                                    if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
+                                        max = c
+                                    }
+                                    if i == (c_records.len() - 1)
+                                        && min.get_first_stamp().is_some()
+                                        && max.get_last_stamp().is_some()
+                                    {
+                                        let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                                        info!(
+                                            "total used cycles= {}, per connection = {}",
+                                            total.separated_string(),
+                                            (total / (i as u64 + 1)).separated_string()
+                                        );
+                                    }
+                                });
+                                assert_eq!(completed_count, tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSyn]);
+                                assert_eq!(
+                                    tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSyn],
+                                    tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck]
+                                );
+                                assert_eq!(
+                                    tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck],
+                                    tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSynAck2]
+                                );
+                                assert!(
+                                    tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFin] + tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFinPssv] <=
+                                        tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentAck4Fin]
+                                );
+                                assert!(
+                                    tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFinPssv] + tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFin] <=
+                                        tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
+                                );
+                            }
+                            _ => ()
                         }
                     }
                 }
@@ -403,10 +406,10 @@ pub fn run_test(test_type: TestType) {
                         info!("Pipeline {}:", p);
                         f.write_all(format!("Pipeline {}:\n", p).as_bytes())
                             .expect("cannot write c_records");
-                        c_records.iter().enumerate().for_each(|(i, c)| {
+                        c_records.as_ref().unwrap().iter().enumerate().for_each(|(i, c)| {
                             let line = format!("{:6}: {}\n", i, c);
                             f.write_all(line.as_bytes()).expect("cannot write c_records");
-                            if c.get_release_cause() == ReleaseCause::PassiveClose
+                            if c.release_cause() == ReleaseCause::PassiveClose
                                 && c.states().last().unwrap() == &TcpState::Closed
                             {
                                 completed_count += 1

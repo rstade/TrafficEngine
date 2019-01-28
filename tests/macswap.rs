@@ -23,6 +23,7 @@ use e2d2::operators::{ReceiveBatch, Batch, TransformBatch, ParsedBatch};
 
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::errors::*;
+use netfcts::ConRecord;
 
 use traffic_lib::{read_config,};
 
@@ -152,8 +153,8 @@ pub fn macswap() {
         Ok(mut context) => {
             context.start_schedulers();
 
-            let (mtx, mrx) = channel::<MessageFrom>();
-            let (reply_mtx, _reply_mrx) = channel::<MessageTo>();
+            let (mtx, mrx) = channel::<MessageFrom<ConRecord>>();
+            let (reply_mtx, _reply_mrx) = channel::<MessageTo<ConRecord>>();
 
             context.add_pipeline_to_run(Box::new(
                 move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {

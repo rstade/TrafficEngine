@@ -31,7 +31,7 @@ use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4};
 use netfcts::tasks::{private_etype, PacketInjector, TickGenerator, install_task};
 use netfcts::timer_wheel::TimerWheel;
-use netfcts::ConRecordOperations;
+use netfcts::{ConRecord, ConRecordOperations};
 use netfcts::HeaderState;
 use netfcts::prepare_checksum_and_ttl;
 use netfcts::set_header;
@@ -53,7 +53,7 @@ pub fn setup_generator(
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom>,
+    tx: Sender<MessageFrom<ConRecord>>,
     system_data: SystemData,
 ) {
     let mut me = engine_config.get_l234data();
@@ -102,7 +102,7 @@ pub fn setup_generator(
 
     // setting up a a reverse message channel between this pipeline and the main program thread
     debug!("{} setting up reverse channel", pipeline_id);
-    let (remote_tx, rx) = channel::<MessageTo>();
+    let (remote_tx, rx) = channel::<MessageTo<ConRecord>>();
     // we send the transmitter to the remote receiver of our messages
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
@@ -254,7 +254,7 @@ pub fn setup_generator(
         #[inline]
         fn syn_received<M: Sized + Send>(p: &mut Packet<TcpHeader, M>, c: &mut Connection, h: &mut HeaderState) {
             c.push_state(TcpState::SynReceived);
-            c.set_dut_sock((h.ip.src(), h.tcp.src_port()));
+            c.set_sock((h.ip.src(), h.tcp.src_port()));
             // debug!("checksum in = {:X}",p.get_header().checksum());
             remove_tcp_options(p, h);
             make_reply_packet(h, 1);
@@ -373,7 +373,7 @@ pub fn setup_generator(
                 c.port(),
                 c.last_state(),
             );
-            c.released(ReleaseCause::PassiveClose);
+            c.set_release_cause(ReleaseCause::PassiveClose);
             counter[TcpStatistics::RecvFin] += 1;
             c.push_state(TcpState::LastAck);
             make_reply_packet(h, 1);
@@ -567,14 +567,15 @@ pub fn setup_generator(
                                 None,
                             ))
                             .unwrap();
+                        info!("{} max concurrent client connections= {}", thread_id, cm_c.max_concurrent_connections())
                     }
                     Ok(MessageTo::FetchCRecords) => {
                         trace!("{} got FetchCrecords" , thread_id);
                         tx_clone
                             .send(MessageFrom::CRecords(
                                 pipeline_id_clone.clone(),
-                                cm_c.fetch_c_records().unwrap(),
-                                cm_s.fetch_c_records().unwrap(),
+                                cm_c.fetch_c_records(),
+                                cm_s.fetch_c_records(),
                             ))
                             .unwrap();
                     }
@@ -634,7 +635,7 @@ pub fn setup_generator(
                                 c.set_server_index(rxq as usize); // we misuse this field for the queue number
                                 c.wheel_slot_and_index = wheel_s.schedule(
                                     &(timeouts.established.unwrap() * system_data.cpu_clock / 1000),
-                                    c.get_dut_sock().unwrap(),
+                                    c.sock().unwrap(),
                                 );
                                 counter_from[TcpStatistics::SentSynAck] += 1;
                                 group_index = 1;
@@ -662,7 +663,7 @@ pub fn setup_generator(
                             trace!("received RST");
                             counter_from[TcpStatistics::RecvRst] += 1;
                             c.push_state(TcpState::Closed);
-                            c.released(ReleaseCause::PassiveRst);
+                            c.set_release_cause(ReleaseCause::PassiveRst);
                             // release connection in the next block
                             b_release_connection_s = true;
                         } else if hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
@@ -679,7 +680,7 @@ pub fn setup_generator(
                                     trace!("received final ACK in passive close");
                                     counter_from[TcpStatistics::RecvAck4Fin] += 1;
                                     c.push_state(TcpState::Closed);
-                                    c.released(ReleaseCause::PassiveClose);
+                                    c.set_release_cause(ReleaseCause::PassiveClose);
                                     // release connection in the next block
                                     b_release_connection_s = true;
                                 }
@@ -708,7 +709,7 @@ pub fn setup_generator(
                                 if old_s_state == TcpState::Established {
                                     s_reply_with_fin(p, &mut c, &mut hs);
                                     counter_from[TcpStatistics::SentFin] += 1;
-                                    c.released(ReleaseCause::ActiveClose);
+                                    c.set_release_cause(ReleaseCause::ActiveClose);
                                     c.push_state(TcpState::FinWait1);
                                 }
                                 counter_from[TcpStatistics::Payload] += 1;
@@ -796,13 +797,13 @@ pub fn setup_generator(
                         } else if hs.tcp.rst_flag() {
                             counter_to[TcpStatistics::RecvRst] += 1;
                             c.push_state(TcpState::Closed);
-                            c.released(ReleaseCause::PassiveRst);
+                            c.set_release_cause(ReleaseCause::PassiveRst);
                             // release connection in the next block
                             b_release_connection_c = true;
                         } else if old_c_state == TcpState::LastAck && hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
                             counter_to[TcpStatistics::RecvAck4Fin] += 1;
                             c.push_state(TcpState::Closed);
-                            c.released(ReleaseCause::PassiveClose);
+                            c.set_release_cause(ReleaseCause::PassiveClose);
                             // release connection in the next block
                             b_release_connection_c = true;
                         } else if hs.tcp.ack_flag() {

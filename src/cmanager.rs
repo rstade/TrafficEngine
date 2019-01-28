@@ -15,13 +15,13 @@ use netfcts::timer_wheel::TimerWheel;
 use PipelineId;
 
 use netfcts::tcp_common::*;
-use netfcts::{RecordStore, ConRecordOperations};
+use netfcts::{RecordStore, ConRecord, ConRecordOperations, HasTcpState};
 use netfcts::utils::shuffle_ports;
 
 #[derive(Clone)]
 pub struct Connection {
     con_rec: Option<usize>,
-    store: Option<Rc<RefCell<RecordStore>>>,
+    store: Option<Rc<RefCell<RecordStore<ConRecord>>>>,
     pub wheel_slot_and_index: (u16, u16),
     /// next client side sequence no towards DUT
     pub seqn_nxt: u32,
@@ -35,7 +35,7 @@ const ERR_NO_CON_RECORD: &str = "connection has no ConRecord";
 
 impl Connection {
     #[inline]
-    fn initialize(&mut self, sock: Option<(u32, u16)>, port: u16, role: TcpRole, store: Rc<RefCell<RecordStore>>) {
+    fn initialize(&mut self, sock: Option<(u32, u16)>, port: u16, role: TcpRole, store: Rc<RefCell<RecordStore<ConRecord>>>) {
         self.seqn_nxt = 0;
         self.seqn_una = 0;
         self.ackn_nxt = 0;
@@ -58,10 +58,10 @@ impl Connection {
     }
 }
 
-impl ConRecordOperations for Connection {
+impl ConRecordOperations<ConRecord> for Connection {
 
     #[inline]
-    fn store(&self) -> &Rc<RefCell<RecordStore>> {
+    fn store(&self) -> &Rc<RefCell<RecordStore<ConRecord>>> {
         self.store.as_ref().unwrap()
     }
 
@@ -99,9 +99,11 @@ impl fmt::Display for Connection {
 pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub struct ConnectionManagerC {
-    c_record_store: Rc<RefCell<RecordStore>>,
+    c_record_store: Rc<RefCell<RecordStore<ConRecord>>>,
     free_ports: VecDeque<u16>,
     ready: VecDeque<u16>,
+    /// min number of free ports
+    min_free_ports: usize,
     // ports of connections with data to send and in state Established when enqueued
     port2con: Vec<Connection>,
     pci: CacheAligned<PortQueue>,
@@ -134,6 +136,7 @@ impl ConnectionManagerC {
                 VecDeque::<u16>::from(vec)
             },
             ready: VecDeque::with_capacity(MAX_CONNECTIONS), // connections which became Established (but may not longer be)
+            min_free_ports: !port_mask as usize +1,
             pci,
             pipeline_id,
             tcp_port_base,
@@ -153,6 +156,11 @@ impl ConnectionManagerC {
         cm
     }
 
+    #[inline]
+    pub fn max_concurrent_connections(&self) -> usize {
+        (!self.pci.port.get_tcp_dst_port_mask() - (if self.tcp_port_base == 0 { 1 } else { 0 } )) as usize - self.min_free_ports
+    }
+
 
     #[inline]
     fn get_mut_con(&mut self, p: &u16) -> &mut Connection {
@@ -170,6 +178,7 @@ impl ConnectionManagerC {
                 let store = Rc::clone(&self.c_record_store);
                 self.get_mut_con(&port).initialize(Some(sock), port, role, store);
             }
+            self.min_free_ports = cmp::min(self.min_free_ports, self.free_ports.len());
             Some(self.get_mut_con(&port))
         } else {
             warn!("out of ports");
@@ -244,7 +253,7 @@ impl ConnectionManagerC {
             let c = self.get_mut_con(&port);
             if c.in_use() {
                 in_use = true;
-                c.released(ReleaseCause::Timeout);
+                c.set_release_cause(ReleaseCause::Timeout);
                 c.push_state(TcpState::Closed);
                 debug!("timing out port {} at {:?}", port, c.wheel_slot_and_index);
                 // now we release the connection inline (cannot call self.release)
@@ -290,7 +299,7 @@ impl ConnectionManagerC {
         */
     }
 
-    pub fn fetch_c_records(&mut self) -> Option<RecordStore> {
+    pub fn fetch_c_records(&mut self) -> Option<RecordStore<ConRecord>> {
         // we are "moving" the con_records out, and replace it with a new one
         let new_store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
         let store = mem::replace(&mut self.c_record_store, new_store);
@@ -343,9 +352,10 @@ impl ConnectionManagerC {
 }
 
 use netfcts::utils::Sock2Index as Sock2Index;
+use std::cmp;
 
 pub struct ConnectionManagerS {
-    c_record_store: Rc<RefCell<RecordStore>>,
+    c_record_store: Rc<RefCell<RecordStore<ConRecord>>>,
     sock2index: Sock2Index,
     //sock2index: HashMap<(u32,u16), u16>,
     //sock2index: BTreeMap<(u32,u16), u16>,
@@ -451,7 +461,7 @@ impl ConnectionManagerS {
             if let Some(c) = opt_c {
                 in_use = c.in_use();
                 if in_use {
-                    c.released(ReleaseCause::Timeout);
+                    c.set_release_cause(ReleaseCause::Timeout);
                     c.push_state(TcpState::Closed);
                     c.release_conrec();
                 }
@@ -463,7 +473,7 @@ impl ConnectionManagerS {
         }
     }
 
-    pub fn fetch_c_records(&mut self) -> Option<RecordStore> {
+    pub fn fetch_c_records(&mut self) -> Option<RecordStore<ConRecord>> {
         // we are "moving" the con_records out, and replace it with a new one
         let new_store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
         let store = mem::replace(&mut self.c_record_store, new_store);

@@ -22,6 +22,7 @@ use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::system::SystemData;
 use netfcts::system::get_mac_from_ifname;
 use netfcts::io::print_tcp_counters;
+use netfcts::{ConRecord, HasTcpState, HasConData};
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
 use netfcts::errors::*;
@@ -46,6 +47,7 @@ use std::io::{Write, BufWriter};
 use std::error::Error;
 use std::fs::File;
 use std::net::{SocketAddrV4, Ipv4Addr};
+use std::mem;
 
 use separator::Separatable;
 use ipnet::Ipv4Net;
@@ -155,8 +157,8 @@ pub fn main() {
                 );
                 context.start_schedulers();
 
-                let (mtx, mrx) = channel::<MessageFrom>();
-                let (reply_mtx, reply_mrx) = channel::<MessageTo>();
+                let (mtx, mrx) = channel::<MessageFrom<ConRecord>>();
+                let (reply_mtx, reply_mrx) = channel::<MessageTo<ConRecord>>();
 
                 let config_cloned = configuration.clone();
                 let system_data_cloned = system_data.clone();
@@ -210,7 +212,7 @@ pub fn main() {
                             tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
                             tcp_counters_from.insert(pipeline_id, tcp_counter_from);
                         }
-                        Ok(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server)) => {
+                        Ok(MessageTo::CRecords(pipeline_id, Some(c_records_client), Some(c_records_server))) => {
                             con_records_c.push((pipeline_id.clone(), c_records_client));
                             con_records_s.push((pipeline_id, c_records_server));
                         }
@@ -224,6 +226,8 @@ pub fn main() {
                         }
                     }
                 }
+
+                info!("Connection record size = {}",  mem::size_of::<ConRecord>());
 
                 let mut file = match File::create("c_records.txt") {
                     Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
@@ -246,7 +250,7 @@ pub fn main() {
                 let mut completed_count_s = 0;
                 for (_p, c_records_server) in &mut con_records_s {
                     c_records_server.iter().enumerate().for_each(|(_i, c)| {
-                        if c.get_release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed
+                        if c.release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed
                         {
                             completed_count_s += 1
                         };
@@ -257,7 +261,7 @@ pub fn main() {
                 for (p, c_records_client) in &mut con_records_c {
                     //let mut vec_client: Vec<_> = c_records_client.iter().collect();
                     let mut completed_count_c = 0;
-                    c_records_client.sort_by(|a, b| a.port.cmp(&b.port));
+                    c_records_client.sort_by(|a, b| a.port().cmp(&b.port()));
 
                     if c_records_client.len() > 0 {
                         total_connections += c_records_client.len();
@@ -272,17 +276,17 @@ pub fn main() {
                                 let c_server = c_server.unwrap();
                                 let line = format!(
                                     "        ({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, +{}, {:?})\n",
-                                    c_server.role,
-                                    if c_server.sock.is_some() {
-                                        let s = c_server.sock.unwrap();
+                                    c_server.role(),
+                                    if c_server.sock().0 != 0 {
+                                        let s = c_server.sock();
                                         SocketAddrV4::new(Ipv4Addr::from(s.0), s.1).to_string()
                                     } else {
                                         "none".to_string()
                                     },
-                                    c_server.port,
-                                    c_server.server_index,
+                                    c_server.port(),
+                                    c_server.server_index(),
                                     c_server.states(),
-                                    c_server.get_release_cause(),
+                                    c_server.release_cause(),
                                     (c_server.get_first_stamp().unwrap() - c.get_first_stamp().unwrap()).separated_string(),
                                     c_server
                                         .deltas_since_synsent_or_synrecv()
@@ -292,7 +296,7 @@ pub fn main() {
                                 );
                                 f.write_all(line.as_bytes()).expect("cannot write c_records");
                             }
-                            if c.get_release_cause() == ReleaseCause::PassiveClose
+                            if c.release_cause() == ReleaseCause::PassiveClose
                                 && c.states().last().unwrap() == &TcpState::Closed
                             {
                                 completed_count_c += 1
