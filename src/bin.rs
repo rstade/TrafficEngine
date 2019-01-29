@@ -289,7 +289,7 @@ pub fn main() {
                                     c_server.release_cause(),
                                     (c_server.get_first_stamp().unwrap() - c.get_first_stamp().unwrap()).separated_string(),
                                     c_server
-                                        .deltas_since_synsent_or_synrecv()
+                                        .deltas_to_base_stamp()
                                         .iter()
                                         .map(|u| u.separated_string())
                                         .collect::<Vec<_>>(),
