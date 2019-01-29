@@ -23,11 +23,9 @@ use e2d2::operators::{ReceiveBatch, Batch, TransformBatch, ParsedBatch};
 
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::errors::*;
-use netfcts::ConRecord;
-
 use traffic_lib::{read_config,};
-
 use traffic_lib::spawn_recv_thread;
+use traffic_lib::TEngineStore;
 
 use std::collections::{HashSet};
 use std::env;
@@ -54,11 +52,13 @@ pub fn nf_macswap<T: 'static + Batch<Header = NullHeader>>(
 
 
 fn test<S>(ports: HashSet<CacheAligned<PortQueue>>, sched: &mut S, _core: i32)
-    where
-        S: Scheduler + Sized,
+where
+    S: Scheduler + Sized,
 {
     for port in &ports {
-        if !port.port.is_kni() { println!("Receiving port {}", port);}
+        if !port.port.is_kni() {
+            println!("Receiving port {}", port);
+        }
     }
 
     let pipelines: Vec<_> = ports
@@ -119,7 +119,8 @@ pub fn macswap() {
     ctrlc::set_handler(move || {
         info!("received SIGINT or SIGTERM");
         r.store(false, Ordering::SeqCst);
-    }).expect("error setting Ctrl-C handler");
+    })
+    .expect("error setting Ctrl-C handler");
 
     let opts = basic_opts();
 
@@ -153,16 +154,12 @@ pub fn macswap() {
         Ok(mut context) => {
             context.start_schedulers();
 
-            let (mtx, mrx) = channel::<MessageFrom<ConRecord>>();
-            let (reply_mtx, _reply_mrx) = channel::<MessageTo<ConRecord>>();
+            let (mtx, mrx) = channel::<MessageFrom<TEngineStore>>();
+            let (reply_mtx, _reply_mrx) = channel::<MessageTo<TEngineStore>>();
 
             context.add_pipeline_to_run(Box::new(
                 move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                    test(
-                        p,
-                        s,
-                        core,
-                    );
+                    test(p, s, core);
                 },
             ));
 

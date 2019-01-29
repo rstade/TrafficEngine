@@ -15,13 +15,15 @@ use netfcts::timer_wheel::TimerWheel;
 use PipelineId;
 
 use netfcts::tcp_common::*;
-use netfcts::{RecordStore, ConRecord, ConRecordOperations, HasTcpState};
+use netfcts::{RecordStore, ConRecord, ConRecordOperations, HasTcpState };
 use netfcts::utils::shuffle_ports;
+
+pub type TEngineStore = RecordStore<ConRecord>;
 
 #[derive(Clone)]
 pub struct Connection {
     con_rec: Option<usize>,
-    store: Option<Rc<RefCell<RecordStore<ConRecord>>>>,
+    store: Option<Rc<RefCell<TEngineStore>>>,
     pub wheel_slot_and_index: (u16, u16),
     /// next client side sequence no towards DUT
     pub seqn_nxt: u32,
@@ -35,14 +37,26 @@ const ERR_NO_CON_RECORD: &str = "connection has no ConRecord";
 
 impl Connection {
     #[inline]
-    fn initialize(&mut self, sock: Option<(u32, u16)>, port: u16, role: TcpRole, store: Rc<RefCell<RecordStore<ConRecord>>>) {
+    fn initialize(
+        &mut self,
+        sock: Option<(u32, u16)>,
+        port: u16,
+        role: TcpRole,
+        store: Rc<RefCell<RecordStore<ConRecord>>>,
+    ) {
         self.seqn_nxt = 0;
         self.seqn_una = 0;
         self.ackn_nxt = 0;
         self.wheel_slot_and_index = (0, 0);
         self.con_rec = Some(store.borrow_mut().get_unused_slot());
         self.store = Some(store);
-        self.store.as_ref().unwrap().borrow_mut().get_mut(self.con_rec()).unwrap().init(role, port, sock);
+        self.store
+            .as_ref()
+            .unwrap()
+            .borrow_mut()
+            .get_mut(self.con_rec())
+            .unwrap()
+            .init(role, port, sock);
     }
 
     #[inline]
@@ -58,10 +72,9 @@ impl Connection {
     }
 }
 
-impl ConRecordOperations<ConRecord> for Connection {
-
+impl ConRecordOperations<TEngineStore> for Connection {
     #[inline]
-    fn store(&self) -> &Rc<RefCell<RecordStore<ConRecord>>> {
+    fn store(&self) -> &Rc<RefCell<TEngineStore>> {
         self.store.as_ref().unwrap()
     }
 
@@ -81,7 +94,6 @@ impl ConRecordOperations<ConRecord> for Connection {
     fn in_use(&self) -> bool {
         self.store.is_some()
     }
-
 }
 
 impl fmt::Display for Connection {
@@ -90,7 +102,11 @@ impl fmt::Display for Connection {
             f,
             "Connection(s-port={}, {:?})",
             self.port(),
-            self.store().borrow_mut().get_mut(self.con_rec.expect("connection has no ConRecord")).unwrap().states(),
+            self.store()
+                .borrow_mut()
+                .get_mut(self.con_rec.expect("connection has no ConRecord"))
+                .unwrap()
+                .states(),
             //self.con_rec().s_states(),
         )
     }
@@ -136,7 +152,7 @@ impl ConnectionManagerC {
                 VecDeque::<u16>::from(vec)
             },
             ready: VecDeque::with_capacity(MAX_CONNECTIONS), // connections which became Established (but may not longer be)
-            min_free_ports: !port_mask as usize +1,
+            min_free_ports: !port_mask as usize + 1,
             pci,
             pipeline_id,
             tcp_port_base,
@@ -158,7 +174,8 @@ impl ConnectionManagerC {
 
     #[inline]
     pub fn max_concurrent_connections(&self) -> usize {
-        (!self.pci.port.get_tcp_dst_port_mask() - (if self.tcp_port_base == 0 { 1 } else { 0 } )) as usize - self.min_free_ports
+        (!self.pci.port.get_tcp_dst_port_mask() - (if self.tcp_port_base == 0 { 1 } else { 0 })) as usize
+            - self.min_free_ports
     }
 
 
@@ -228,8 +245,10 @@ impl ConnectionManagerC {
                 (Some(mut drain), more) => {
                     let mut port = drain.next();
                     while port.is_some() {
-                        let p=port.unwrap();
-                        if p != 0 { self.timeout(p); }
+                        let p = port.unwrap();
+                        if p != 0 {
+                            self.timeout(p);
+                        }
                         port = drain.next();
                     }
                     if !more {
@@ -260,7 +279,9 @@ impl ConnectionManagerC {
                 c.release_conrec();
             }
         }
-        if in_use { self.free_ports.push_back(port); }
+        if in_use {
+            self.free_ports.push_back(port);
+        }
     }
 
     #[inline]
@@ -271,7 +292,7 @@ impl ConnectionManagerC {
             self.free_ports.push_front(port);
             c.release_conrec();
             //remove port from timer wheel by overwriting it
-            let old= wheel.replace(c.wheel_slot_and_index, 0);
+            let old = wheel.replace(c.wheel_slot_and_index, 0);
             assert_eq!(old.unwrap(), port);
             // we keep unused connection in port2con table
         }
@@ -279,7 +300,11 @@ impl ConnectionManagerC {
 
     #[allow(dead_code)]
     pub fn dump_records(&mut self) {
-        info!("{}: {:6} closed connections", self.pipeline_id, self.c_record_store.borrow().len());
+        info!(
+            "{}: {:6} closed connections",
+            self.pipeline_id,
+            self.c_record_store.borrow().len()
+        );
         self.c_record_store
             .borrow()
             .iter()
@@ -334,7 +359,7 @@ impl ConnectionManagerC {
             match self.ready.pop_front() {
                 Some(port) => {
                     let c = &self.port2con[(port - self.tcp_port_base) as usize];
-                    trace!("found ready connection {}", if c.in_use() { c.port() } else { 0 } );
+                    trace!("found ready connection {}", if c.in_use() { c.port() } else { 0 });
                     if c.in_use() && c.last_state() == TcpState::Established {
                         port_result = Some(port)
                     }
@@ -419,7 +444,7 @@ impl ConnectionManagerS {
             if c.in_use() {
                 self.free_slots.push_front(index.unwrap() as usize);
                 //remove port from timer wheel by overwriting it
-                let old= wheel.replace(c.wheel_slot_and_index, (0, 0));
+                let old = wheel.replace(c.wheel_slot_and_index, (0, 0));
                 assert_eq!(old.unwrap(), *sock);
             }
             c.release_conrec();
@@ -435,8 +460,10 @@ impl ConnectionManagerS {
                 (Some(mut drain), more) => {
                     let mut sock = drain.next();
                     while sock.is_some() {
-                        let s=sock.unwrap();
-                        if s.1 != 0 { self.timeout(&s); }
+                        let s = sock.unwrap();
+                        if s.1 != 0 {
+                            self.timeout(&s);
+                        }
                         sock = drain.next();
                     }
                     if !more {

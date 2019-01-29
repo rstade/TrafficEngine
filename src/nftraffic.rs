@@ -31,12 +31,13 @@ use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4};
 use netfcts::tasks::{private_etype, PacketInjector, TickGenerator, install_task};
 use netfcts::timer_wheel::TimerWheel;
-use netfcts::{ConRecord, ConRecordOperations};
+use netfcts::{ConRecordOperations};
 use netfcts::HeaderState;
 use netfcts::prepare_checksum_and_ttl;
 use netfcts::set_header;
 use netfcts::remove_tcp_options;
 use netfcts::make_reply_packet;
+use TEngineStore;
 
 const MIN_FRAME_SIZE: usize = 60;
 
@@ -53,7 +54,7 @@ pub fn setup_generator(
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom<ConRecord>>,
+    tx: Sender<MessageFrom<TEngineStore>>,
     system_data: SystemData,
 ) {
     let mut me = engine_config.get_l234data();
@@ -91,18 +92,20 @@ pub fn setup_generator(
 
     // check that we do not overflow the wheel:
     if timeouts.established.is_some() {
-        let timeout=timeouts.established.unwrap();
+        let timeout = timeouts.established.unwrap();
         if timeout > wheel_c.get_max_timeout_cycles() {
-            warn!("timeout defined in configuration file overflows timer wheel: reset to {} millis",
-                  wheel_c.get_max_timeout_cycles() * 1000 / system_data.cpu_clock);
-            timeouts.established= Some(wheel_c.get_max_timeout_cycles());
+            warn!(
+                "timeout defined in configuration file overflows timer wheel: reset to {} millis",
+                wheel_c.get_max_timeout_cycles() * 1000 / system_data.cpu_clock
+            );
+            timeouts.established = Some(wheel_c.get_max_timeout_cycles());
         }
     }
 
 
     // setting up a a reverse message channel between this pipeline and the main program thread
     debug!("{} setting up reverse channel", pipeline_id);
-    let (remote_tx, rx) = channel::<MessageTo<ConRecord>>();
+    let (remote_tx, rx) = channel::<MessageTo<TEngineStore>>();
     // we send the transmitter to the remote receiver of our messages
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
@@ -529,7 +532,7 @@ pub fn setup_generator(
                 if let Some(c) = cm_c.get_ready_connection() {
                     cdata.client_port = c.port();
                     cdata.uuid = c.get_uid();
-                    trace!("{} sending payload on port {}" , thread_id, cdata.client_port);
+                    trace!("{} sending payload on port {}", thread_id, cdata.client_port);
                     let bin_vec = serialize(&cdata).unwrap();
                     make_payload_packet(p, c, &mut hs, &me, &servers, &bin_vec);
                     counter_to[TcpStatistics::Payload] += 1;
@@ -567,10 +570,14 @@ pub fn setup_generator(
                                 None,
                             ))
                             .unwrap();
-                        info!("{} max concurrent client connections= {}", thread_id, cm_c.max_concurrent_connections())
+                        info!(
+                            "{} max concurrent client connections= {}",
+                            thread_id,
+                            cm_c.max_concurrent_connections()
+                        )
                     }
                     Ok(MessageTo::FetchCRecords) => {
-                        trace!("{} got FetchCrecords" , thread_id);
+                        trace!("{} got FetchCrecords", thread_id);
                         tx_clone
                             .send(MessageFrom::CRecords(
                                 pipeline_id_clone.clone(),
@@ -587,14 +594,17 @@ pub fn setup_generator(
                     cm_s.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_s);
                 }
                 #[cfg(feature = "profiling")]
+                {
+                    let tx_stats_now = tx_stats.stats.load(Ordering::Relaxed);
+                    let rx_stats_now = rx_stats.stats.load(Ordering::Relaxed);
+                    // only save changes
+                    if rx_tx_stats.last().is_none()
+                        || tx_stats_now != rx_tx_stats.last().unwrap().2
+                        || rx_stats_now != rx_tx_stats.last().unwrap().1
                     {
-                        let tx_stats_now = tx_stats.stats.load(Ordering::Relaxed);
-                        let rx_stats_now = rx_stats.stats.load(Ordering::Relaxed);
-                        // only save changes
-                        if rx_tx_stats.last().is_none() || tx_stats_now != rx_tx_stats.last().unwrap().2 || rx_stats_now != rx_tx_stats.last().unwrap().1 {
-                            rx_tx_stats.push((utils::rdtsc_unsafe(), rx_stats_now, tx_stats_now));
-                        }
+                        rx_tx_stats.push((utils::rdtsc_unsafe(), rx_stats_now, tx_stats_now));
                     }
+                }
             }
             (ETYPE_IPV4, dst_port) if dst_port == server_listen_port => {
                 //server side

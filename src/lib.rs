@@ -25,6 +25,7 @@ mod cmanager;
 
 pub use netfcts::tcp_common::{CData, L234Data, ReleaseCause, UserData, TcpRole, TcpState, TcpCounter, TcpStatistics};
 pub use netfcts::ConRecord;
+pub use cmanager::TEngineStore;
 
 use eui48::MacAddress;
 use uuid::Uuid;
@@ -166,7 +167,7 @@ pub fn setup_pipelines(
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
     flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom<ConRecord>>,
+    tx: Sender<MessageFrom<TEngineStore>>,
     system_data: SystemData,
 ) {
     let mut kni: Option<&CacheAligned<PortQueue>> = None;
@@ -229,7 +230,11 @@ pub fn setup_pipelines(
     );
 }
 
-pub fn spawn_recv_thread(mrx: Receiver<MessageFrom<ConRecord>>, mut context: NetBricksContext, configuration: Configuration) {
+pub fn spawn_recv_thread(
+    mrx: Receiver<MessageFrom<TEngineStore>>,
+    mut context: NetBricksContext,
+    configuration: Configuration,
+) {
     /*
         mrx: receiver for messages from all the pipelines running
     */

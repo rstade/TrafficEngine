@@ -12,7 +12,7 @@ vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk
 
 [trafficengine]
 
-engine      = { namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24", port=20001, timeouts= { established= 5000 }, cps_limit= 75000  }
+engine      = { namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24", port=20001, timeouts= { established= 5000 }, cps_limit= 125000  }
 targets     = [ { id = "proxy", ip = "192.168.222.8", mac="3c:fd:fe:9e:ce:4c" , port = 19999 },
               ]
 test_size   = 40000

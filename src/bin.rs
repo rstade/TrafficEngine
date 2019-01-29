@@ -33,6 +33,7 @@ use traffic_lib::L234Data;
 use traffic_lib::spawn_recv_thread;
 use traffic_lib::ReleaseCause;
 use traffic_lib::TcpState;
+use traffic_lib::TEngineStore;
 
 use std::collections::{HashSet, HashMap};
 use std::env;
@@ -103,7 +104,7 @@ pub fn main() {
         info!("received SIGINT or SIGTERM");
         r.store(false, Ordering::SeqCst);
     })
-        .expect("error setting Ctrl-C handler");
+    .expect("error setting Ctrl-C handler");
 
     let opts = basic_opts();
 
@@ -148,224 +149,222 @@ pub fn main() {
     match initialize_system(&mut netbricks_configuration)
         .map_err(|e| e.into())
         .and_then(|ctxt| check_system(ctxt))
-        {
-            Ok(mut context) => {
-                let flowdirector_map = initialize_flowdirector(
-                    &context,
-                    configuration.flow_steering_mode(),
-                    &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
-                );
-                context.start_schedulers();
+    {
+        Ok(mut context) => {
+            let flowdirector_map = initialize_flowdirector(
+                &context,
+                configuration.flow_steering_mode(),
+                &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
+            );
+            context.start_schedulers();
 
-                let (mtx, mrx) = channel::<MessageFrom<ConRecord>>();
-                let (reply_mtx, reply_mrx) = channel::<MessageTo<ConRecord>>();
+            let (mtx, mrx) = channel::<MessageFrom<TEngineStore>>();
+            let (reply_mtx, reply_mrx) = channel::<MessageTo<TEngineStore>>();
 
-                let config_cloned = configuration.clone();
-                let system_data_cloned = system_data.clone();
-                let mtx_clone = mtx.clone();
+            let config_cloned = configuration.clone();
+            let system_data_cloned = system_data.clone();
+            let mtx_clone = mtx.clone();
 
-                context.add_pipeline_to_run(Box::new(
-                    move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                        setup_pipelines(
-                            core,
-                            config_cloned.test_size.unwrap(), // no of packets to generate per pipeline
-                            p,
-                            s,
-                            &config_cloned.engine,
-                            l234data.clone(),
-                            flowdirector_map.clone(),
-                            mtx_clone.clone(),
-                            system_data_cloned.clone(),
-                        );
-                    },
-                ));
-
-                let cores = context.active_cores.clone();
-
-                // start the controller
-                spawn_recv_thread(mrx, context, configuration);
-
-                // give threads some time to do initialization work
-                thread::sleep(Duration::from_millis(1000 as u64));
-
-                // start generator
-                mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-                // use sufficient time for traffic engine to complete the run:
-                thread::sleep(Duration::from_millis(5000 as u64));
-
-                mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
-                thread::sleep(Duration::from_millis(100 as u64));
-                mtx.send(MessageFrom::FetchCounter).unwrap();
-                mtx.send(MessageFrom::FetchCRecords).unwrap();
-
-                let mut tcp_counters_to = HashMap::new();
-                let mut tcp_counters_from = HashMap::new();
-                let mut con_records_s = Vec::with_capacity(64);
-                let mut con_records_c = Vec::with_capacity(64);
-
-                loop {
-                    match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
-                        Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, _rx_tx_stats)) => {
-                            print_tcp_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from);
-                            #[cfg(feature = "profiling")]
-                                print_rx_tx_counters(&pipeline_id, &_rx_tx_stats.unwrap());
-                            tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
-                            tcp_counters_from.insert(pipeline_id, tcp_counter_from);
-                        }
-                        Ok(MessageTo::CRecords(pipeline_id, Some(c_records_client), Some(c_records_server))) => {
-                            con_records_c.push((pipeline_id.clone(), c_records_client));
-                            con_records_s.push((pipeline_id, c_records_server));
-                        }
-                        Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
-                        Err(RecvTimeoutError::Timeout) => {
-                            break;
-                        }
-                        Err(e) => {
-                            error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
-                            break;
-                        }
-                    }
-                }
-
-                info!("Connection record size = {}",  mem::size_of::<ConRecord>());
-
-                let mut file = match File::create("c_records.txt") {
-                    Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
-                    Ok(file) => file,
-                };
-                let mut f = BufWriter::new(file);
-
-                //we are searching for the most extreme time stamps over all pipes
-                let mut min_total;
-                let mut max_total;
-                let mut total_connections = 0;
-                {
-                    let cc = &(con_records_c[0].1);
-                    min_total = cc.iter().last().unwrap().clone();
-                    max_total = min_total.clone();
-                }
-
-                // a hash map of all server side records by uuid
-                let mut by_uuid = HashMap::with_capacity(con_records_s[0].1.len() * con_records_s.len());
-                let mut completed_count_s = 0;
-                for (_p, c_records_server) in &mut con_records_s {
-                    c_records_server.iter().enumerate().for_each(|(_i, c)| {
-                        if c.release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed
-                        {
-                            completed_count_s += 1
-                        };
-                        by_uuid.insert(c.uid(), c);
-                    });
-                }
-
-                for (p, c_records_client) in &mut con_records_c {
-                    //let mut vec_client: Vec<_> = c_records_client.iter().collect();
-                    let mut completed_count_c = 0;
-                    c_records_client.sort_by(|a, b| a.port().cmp(&b.port()));
-
-                    if c_records_client.len() > 0 {
-                        total_connections += c_records_client.len();
-                        let mut min = c_records_client.iter().last().unwrap();
-                        let mut max = min;
-                        c_records_client.iter().enumerate().for_each(|(i, c)| {
-                            let uuid = c.uid();
-                            let c_server = by_uuid.remove(&uuid);
-                            let line = format!("{:6}: {}\n", i, c);
-                            f.write_all(line.as_bytes()).expect("cannot write c_records");
-                            if c_server.is_some() {
-                                let c_server = c_server.unwrap();
-                                let line = format!(
-                                    "        ({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, +{}, {:?})\n",
-                                    c_server.role(),
-                                    if c_server.sock().0 != 0 {
-                                        let s = c_server.sock();
-                                        SocketAddrV4::new(Ipv4Addr::from(s.0), s.1).to_string()
-                                    } else {
-                                        "none".to_string()
-                                    },
-                                    c_server.port(),
-                                    c_server.server_index(),
-                                    c_server.states(),
-                                    c_server.release_cause(),
-                                    (c_server.get_first_stamp().unwrap() - c.get_first_stamp().unwrap()).separated_string(),
-                                    c_server
-                                        .deltas_to_base_stamp()
-                                        .iter()
-                                        .map(|u| u.separated_string())
-                                        .collect::<Vec<_>>(),
-                                );
-                                f.write_all(line.as_bytes()).expect("cannot write c_records");
-                            }
-                            if c.release_cause() == ReleaseCause::PassiveClose
-                                && c.states().last().unwrap() == &TcpState::Closed
-                            {
-                                completed_count_c += 1
-                            }
-                            if c.get_first_stamp().unwrap_or(u64::max_value())
-                                < min.get_first_stamp().unwrap_or(u64::max_value())
-                            {
-                                min = c
-                            }
-                            if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
-                                max = c
-                            }
-                            if i == (c_records_client.len() - 1)
-                                && min.get_first_stamp().is_some()
-                                && max.get_last_stamp().is_some()
-                            {
-                                let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                                info!(
-                                    "{} total used cycles = {}, per connection = {}",
-                                    p,
-                                    total.separated_string(),
-                                    (total / (i as u64 + 1)).separated_string()
-                                );
-                            }
-                        });
-                        if min.get_first_stamp().unwrap_or(u64::max_value())
-                            < min_total.get_first_stamp().unwrap_or(u64::max_value())
-                        {
-                            min_total = min.clone()
-                        }
-                        if max.get_last_stamp().unwrap_or(0) > max_total.get_last_stamp().unwrap_or(0) {
-                            max_total = max.clone()
-                        }
-                    }
-
-                    info!("{} completed client connections = {}", p, completed_count_c);
-                }
-
-                info!("total completed server connections = {}", completed_count_s);
-
-                info!("unbound server-side connections ({})", by_uuid.len());
-                by_uuid.iter().enumerate().for_each(|(i, (_, c))| {
-                    debug!("{:6}: {}", i, c);
-                });
-
-
-                if min_total.get_first_stamp().is_some() && max_total.get_last_stamp().is_some() {
-                    let total = max_total.get_last_stamp().unwrap() - min_total.get_first_stamp().unwrap();
-                    info!(
-                        "max used cycles over all pipelines = {}, per connection = {} ({} cps)",
-                        total.separated_string(),
-                        (total / (total_connections as u64)).separated_string(),
-                        system_data.cpu_clock / (total / (total_connections as u64 + 1)),
+            context.add_pipeline_to_run(Box::new(
+                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+                    setup_pipelines(
+                        core,
+                        config_cloned.test_size.unwrap(), // no of packets to generate per pipeline
+                        p,
+                        s,
+                        &config_cloned.engine,
+                        l234data.clone(),
+                        flowdirector_map.clone(),
+                        mtx_clone.clone(),
+                        system_data_cloned.clone(),
                     );
+                },
+            ));
+
+            let cores = context.active_cores.clone();
+
+            // start the controller
+            spawn_recv_thread(mrx, context, configuration);
+
+            // give threads some time to do initialization work
+            thread::sleep(Duration::from_millis(1000 as u64));
+
+            // start generator
+            mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
+            // use sufficient time for traffic engine to complete the run:
+            thread::sleep(Duration::from_millis(5000 as u64));
+
+            mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
+            thread::sleep(Duration::from_millis(100 as u64));
+            mtx.send(MessageFrom::FetchCounter).unwrap();
+            mtx.send(MessageFrom::FetchCRecords).unwrap();
+
+            let mut tcp_counters_to = HashMap::new();
+            let mut tcp_counters_from = HashMap::new();
+            let mut con_records_s = Vec::with_capacity(64);
+            let mut con_records_c = Vec::with_capacity(64);
+
+            loop {
+                match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
+                    Ok(MessageTo::Counter(pipeline_id, tcp_counter_to, tcp_counter_from, _rx_tx_stats)) => {
+                        print_tcp_counters(&pipeline_id, &tcp_counter_to, &tcp_counter_from);
+                        #[cfg(feature = "profiling")]
+                        print_rx_tx_counters(&pipeline_id, &_rx_tx_stats.unwrap());
+                        tcp_counters_to.insert(pipeline_id.clone(), tcp_counter_to);
+                        tcp_counters_from.insert(pipeline_id, tcp_counter_from);
+                    }
+                    Ok(MessageTo::CRecords(pipeline_id, Some(c_records_client), Some(c_records_server))) => {
+                        con_records_c.push((pipeline_id.clone(), c_records_client));
+                        con_records_s.push((pipeline_id, c_records_server));
+                    }
+                    Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
+                    Err(RecvTimeoutError::Timeout) => {
+                        break;
+                    }
+                    Err(e) => {
+                        error!("error receiving from reply_to_main channel (reply_mrx): {}", e);
+                        break;
+                    }
+                }
+            }
+
+            info!("Connection record size = {}", mem::size_of::<ConRecord>());
+
+            let mut file = match File::create("c_records.txt") {
+                Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
+                Ok(file) => file,
+            };
+            let mut f = BufWriter::new(file);
+
+            //we are searching for the most extreme time stamps over all pipes
+            let mut min_total;
+            let mut max_total;
+            let mut total_connections = 0;
+            {
+                let cc = &(con_records_c[0].1);
+                min_total = cc.iter().last().unwrap().clone();
+                max_total = min_total.clone();
+            }
+
+            // a hash map of all server side records by uuid
+            let mut by_uuid = HashMap::with_capacity(con_records_s[0].1.len() * con_records_s.len());
+            let mut completed_count_s = 0;
+            for (_p, c_records_server) in &mut con_records_s {
+                c_records_server.iter().enumerate().for_each(|(_i, c)| {
+                    if c.release_cause() == ReleaseCause::ActiveClose && c.states().last().unwrap() == &TcpState::Closed {
+                        completed_count_s += 1
+                    };
+                    by_uuid.insert(c.uid(), c);
+                });
+            }
+
+            for (p, c_records_client) in &mut con_records_c {
+                //let mut vec_client: Vec<_> = c_records_client.iter().collect();
+                let mut completed_count_c = 0;
+                c_records_client.sort_by(|a, b| a.port().cmp(&b.port()));
+
+                if c_records_client.len() > 0 {
+                    total_connections += c_records_client.len();
+                    let mut min = c_records_client.iter().last().unwrap();
+                    let mut max = min;
+                    c_records_client.iter().enumerate().for_each(|(i, c)| {
+                        let uuid = c.uid();
+                        let c_server = by_uuid.remove(&uuid);
+                        let line = format!("{:6}: {}\n", i, c);
+                        f.write_all(line.as_bytes()).expect("cannot write c_records");
+                        if c_server.is_some() {
+                            let c_server = c_server.unwrap();
+                            let line = format!(
+                                "        ({:?}, {:21}, {:6}, {:3}, {:?}, {:?}, +{}, {:?})\n",
+                                c_server.role(),
+                                if c_server.sock().0 != 0 {
+                                    let s = c_server.sock();
+                                    SocketAddrV4::new(Ipv4Addr::from(s.0), s.1).to_string()
+                                } else {
+                                    "none".to_string()
+                                },
+                                c_server.port(),
+                                c_server.server_index(),
+                                c_server.states(),
+                                c_server.release_cause(),
+                                (c_server.get_first_stamp().unwrap() - c.get_first_stamp().unwrap()).separated_string(),
+                                c_server
+                                    .deltas_to_base_stamp()
+                                    .iter()
+                                    .map(|u| u.separated_string())
+                                    .collect::<Vec<_>>(),
+                            );
+                            f.write_all(line.as_bytes()).expect("cannot write c_records");
+                        }
+                        if c.release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed
+                        {
+                            completed_count_c += 1
+                        }
+                        if c.get_first_stamp().unwrap_or(u64::max_value())
+                            < min.get_first_stamp().unwrap_or(u64::max_value())
+                        {
+                            min = c
+                        }
+                        if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
+                            max = c
+                        }
+                        if i == (c_records_client.len() - 1)
+                            && min.get_first_stamp().is_some()
+                            && max.get_last_stamp().is_some()
+                        {
+                            let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                            info!(
+                                "{} total used cycles = {}, per connection = {}",
+                                p,
+                                total.separated_string(),
+                                (total / (i as u64 + 1)).separated_string()
+                            );
+                        }
+                    });
+                    if min.get_first_stamp().unwrap_or(u64::max_value())
+                        < min_total.get_first_stamp().unwrap_or(u64::max_value())
+                    {
+                        min_total = min.clone()
+                    }
+                    if max.get_last_stamp().unwrap_or(0) > max_total.get_last_stamp().unwrap_or(0) {
+                        max_total = max.clone()
+                    }
                 }
 
-                f.flush().expect("cannot flush BufWriter");
-
-                mtx.send(MessageFrom::Exit).unwrap();
-
-                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-                std::process::exit(0);
+                info!("{} completed client connections = {}", p, completed_count_c);
             }
-            Err(ref e) => {
-                error!("Error: {}", e);
-                if let Some(backtrace) = e.backtrace() {
-                    debug!("Backtrace: {:?}", backtrace);
-                }
-                std::process::exit(1);
+
+            info!("total completed server connections = {}", completed_count_s);
+
+            info!("unbound server-side connections ({})", by_uuid.len());
+            by_uuid.iter().enumerate().for_each(|(i, (_, c))| {
+                debug!("{:6}: {}", i, c);
+            });
+
+
+            if min_total.get_first_stamp().is_some() && max_total.get_last_stamp().is_some() {
+                let total = max_total.get_last_stamp().unwrap() - min_total.get_first_stamp().unwrap();
+                info!(
+                    "max used cycles over all pipelines = {}, per connection = {} ({} cps)",
+                    total.separated_string(),
+                    (total / (total_connections as u64)).separated_string(),
+                    system_data.cpu_clock / (total / (total_connections as u64 + 1)),
+                );
             }
+
+            f.flush().expect("cannot flush BufWriter");
+
+            mtx.send(MessageFrom::Exit).unwrap();
+
+            thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+            std::process::exit(0);
         }
+        Err(ref e) => {
+            error!("Error: {}", e);
+            if let Some(backtrace) = e.backtrace() {
+                debug!("Backtrace: {:?}", backtrace);
+            }
+            std::process::exit(1);
+        }
+    }
 }
