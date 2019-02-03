@@ -31,7 +31,6 @@ use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4};
 use netfcts::tasks::{private_etype, PacketInjector, TickGenerator, install_task};
 use netfcts::timer_wheel::TimerWheel;
-use netfcts::{ConRecordOperations};
 use netfcts::HeaderState;
 use netfcts::prepare_checksum_and_ttl;
 use netfcts::set_header;
@@ -68,8 +67,9 @@ pub fn setup_generator(
     };
     debug!("enter setup_generator {}", pipeline_id);
 
-    let mut cm_c = ConnectionManagerC::new(pipeline_id.clone(), pci.clone(), l4flow_for_this_core);
-    let mut cm_s = ConnectionManagerS::new();
+    let detailed_records = engine_config.detailed_records.unwrap_or(false);
+    let mut cm_c = ConnectionManagerC::new(pipeline_id.clone(), pci.clone(), l4flow_for_this_core, detailed_records);
+    let mut cm_s = ConnectionManagerS::new(detailed_records);
 
     let mut timeouts = Timeouts::default_or_some(&engine_config.timeouts);
 
@@ -119,6 +119,8 @@ pub fn setup_generator(
     let thread_id = format!("<c{}, rx{}>: ", core, pci.rxq());
     let tx_clone = tx.clone();
     let mut counter_to = TcpCounter::new();
+    let mut start_stamp: u64 = 0;
+    let mut stop_stamp: u64 = 0;
     let mut counter_from = TcpCounter::new();
     #[cfg(feature = "profiling")]
     let mut rx_tx_stats = Vec::with_capacity(10000);
@@ -374,7 +376,7 @@ pub fn setup_generator(
                 thread_id,
                 h.tcp.src_port(),
                 c.port(),
-                c.last_state(),
+                c.state(),
             );
             c.set_release_cause(ReleaseCause::PassiveClose);
             counter[TcpStatistics::RecvFin] += 1;
@@ -501,6 +503,9 @@ pub fn setup_generator(
         match (hs.mac.etype(), hs.tcp.dst_port()) {
             // SYN injection
             (PRIVATE_ETYPE_PACKET, 1) => {
+                if counter_to[TcpStatistics::SentSyn] == 0 {
+                    start_stamp = utils::rdtscp_unsafe()
+                }
                 if counter_to[TcpStatistics::SentSyn] < nr_connections {
                     if let Some(c) = cm_c.create(TcpRole::Client) {
                         generate_syn(
@@ -531,7 +536,7 @@ pub fn setup_generator(
                 //trace!("{} payload injection packet received", thread_id);
                 if let Some(c) = cm_c.get_ready_connection() {
                     cdata.client_port = c.port();
-                    cdata.uuid = c.get_uid();
+                    cdata.uuid = c.uid();
                     trace!("{} sending payload on port {}", thread_id, cdata.client_port);
                     let bin_vec = serialize(&cdata).unwrap();
                     make_payload_packet(p, c, &mut hs, &me, &servers, &bin_vec);
@@ -588,6 +593,14 @@ pub fn setup_generator(
                     }
                     _ => {}
                 }
+                // check if we ready and both time stamps are set:
+                if start_stamp > 0 && stop_stamp > 0 {
+                    tx_clone
+                        .send(MessageFrom::TimeStamps(pipeline_id_clone.clone(), start_stamp, stop_stamp))
+                        .unwrap();
+                    // so we  do not send again:
+                    start_stamp = 0;
+                }
                 // check for timeouts
                 if ticks % wheel_tick_reduction_factor == 0 {
                     cm_c.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_c);
@@ -625,7 +638,7 @@ pub fn setup_generator(
                 match opt_c {
                     None => warn!("no state for this packet on server port"),
                     Some(mut c) => {
-                        let old_s_state = c.last_state().clone();
+                        let old_s_state = c.state().clone();
                         //check seqn
                         if old_s_state != TcpState::Listen && hs.tcp.seq_num() != c.ackn_nxt {
                             let diff = hs.tcp.seq_num() as i64 - c.ackn_nxt as i64;
@@ -679,7 +692,7 @@ pub fn setup_generator(
                         } else if hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
                             match old_s_state {
                                 TcpState::SynReceived => {
-                                    c.con_established();
+                                    c.push_state(TcpState::Established);
                                     counter_from[TcpStatistics::RecvSynAck2] += 1;
                                     debug!("{} connection from DUT ({:?}) established", thread_id, src_sock);
                                     #[cfg(feature = "profiling")]
@@ -707,14 +720,15 @@ pub fn setup_generator(
                         if old_s_state >= TcpState::Established && hs.tcp_payload_len() > 0 {
                             if c.payload_packets() == 0 {
                                 //first payload packet
-                                match deserialize::<CData>(p.get_payload()) {
-                                    Ok(cdata) => {
-                                        c.set_port(cdata.client_port);
-                                        let uuid = cdata.uuid;
-                                        debug!("{} received payload {:?}", thread_id, cdata);
-                                        c.set_uid(uuid);
+                                if detailed_records {
+                                    match deserialize::<CData>(p.get_payload()) {
+                                        Ok(cdata) => {
+                                            let uuid = cdata.uuid;
+                                            debug!("{} received payload {:?}", thread_id, cdata);
+                                            c.set_uid(uuid);
+                                        }
+                                        _ => (),
                                     }
-                                    _ => (),
                                 }
                                 if old_s_state == TcpState::Established {
                                     s_reply_with_fin(p, &mut c, &mut hs);
@@ -760,7 +774,7 @@ pub fn setup_generator(
                     }
                     Some(mut c) => {
                         //debug!("incoming packet for connection {}", c);
-                        let old_c_state = c.last_state().clone();
+                        let old_c_state = c.state().clone();
 
                         //check seqn
                         if old_c_state != TcpState::SynSent && hs.tcp.seq_num() != c.ackn_nxt {
@@ -777,7 +791,7 @@ pub fn setup_generator(
                             group_index = 1;
                             counter_to[TcpStatistics::RecvSynAck] += 1;
                             if old_c_state == TcpState::SynSent {
-                                c.con_established();
+                                c.push_state(TcpState::Established);
                                 ready_connection = Some(c.port());
                                 debug!(
                                     "{} connection for port {} to DUT ({:?}) established ",
@@ -812,6 +826,9 @@ pub fn setup_generator(
                             b_release_connection_c = true;
                         } else if old_c_state == TcpState::LastAck && hs.tcp.ack_flag() && hs.tcp.ack_num() == c.seqn_nxt {
                             counter_to[TcpStatistics::RecvAck4Fin] += 1;
+                            if counter_to[TcpStatistics::RecvAck4Fin] == nr_connections {
+                                stop_stamp = utils::rdtscp_unsafe()
+                            }
                             c.push_state(TcpState::Closed);
                             c.set_release_cause(ReleaseCause::PassiveClose);
                             // release connection in the next block

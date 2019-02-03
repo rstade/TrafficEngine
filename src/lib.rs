@@ -25,7 +25,7 @@ mod cmanager;
 
 pub use netfcts::tcp_common::{CData, L234Data, ReleaseCause, UserData, TcpRole, TcpState, TcpCounter, TcpStatistics};
 pub use netfcts::ConRecord;
-pub use cmanager::TEngineStore;
+pub use cmanager::{TEngineStore, Connection};
 
 use eui48::MacAddress;
 use uuid::Uuid;
@@ -86,6 +86,7 @@ pub struct EngineConfig {
     pub timeouts: Option<Timeouts>,
     pub port: u16,
     pub cps_limit: Option<u64>,
+    pub detailed_records: Option<bool>,
 }
 
 impl EngineConfig {
@@ -346,6 +347,15 @@ pub fn spawn_recv_thread(
                     for (_p, s) in &senders {
                         s.send(MessageTo::FetchCRecords).unwrap();
                     }
+                }
+                Ok(MessageFrom::TimeStamps(p, t0, t1)) => {
+                    if reply_to_main.is_some() {
+                        reply_to_main
+                            .as_ref()
+                            .unwrap()
+                            .send(MessageTo::TimeStamps(p, t0, t1))
+                            .unwrap();
+                    };
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => {

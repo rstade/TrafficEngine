@@ -306,7 +306,9 @@ pub fn run_test(test_type: TestType) {
             }
             */
             mtx.send(MessageFrom::FetchCounter).unwrap();
-            mtx.send(MessageFrom::FetchCRecords).unwrap();
+            if configuration.engine.detailed_records.unwrap_or(false) {
+                mtx.send(MessageFrom::FetchCRecords).unwrap();
+            }
 
 
             let mut tcp_counters_to = HashMap::new();
@@ -336,96 +338,125 @@ pub fn run_test(test_type: TestType) {
                 }
             }
 
-            let mut file = match File::create("c_records.txt") {
-                Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
-                Ok(file) => file,
-            };
-            let mut f = BufWriter::new(file);
+            if configuration.engine.detailed_records.unwrap_or(false) {
+                let mut file = match File::create("c_records.txt") {
+                    Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
+                    Ok(file) => file,
+                };
+                let mut f = BufWriter::new(file);
 
-            assert_ne!(con_records.len(), 0);
-            if test_type == TestType::Server {
-                for (p, (_, c_records)) in &con_records {
-                    match c_records {
-                        Some(c_records) if c_records.len() > 0 => {
-                            let mut completed_count = 0;
-                            let mut min = c_records.iter().last().unwrap();
-                            let mut max = min;
-                            c_records.iter().enumerate().for_each(|(i, c)| {
-                                let line = format!("{:6}: {}\n", i, c);
-                                f.write_all(line.as_bytes()).expect("cannot write c_records");
-                                if c.release_cause() == ReleaseCause::ActiveClose
-                                    && c.states().last().unwrap() == &TcpState::Closed
-                                {
-                                    completed_count += 1
-                                }
-                                if c.get_first_stamp().unwrap_or(u64::max_value())
-                                    < min.get_first_stamp().unwrap_or(u64::max_value())
-                                {
-                                    min = c
-                                }
-                                if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
-                                    max = c
-                                }
-                                if i == (c_records.len() - 1)
-                                    && min.get_first_stamp().is_some()
-                                    && max.get_last_stamp().is_some()
-                                {
-                                    let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
-                                    info!(
-                                        "total used cycles= {}, per connection = {}",
-                                        total.separated_string(),
-                                        (total / (i as u64 + 1)).separated_string()
-                                    );
-                                }
-                            });
-                            assert_eq!(completed_count, tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSyn]);
-                            assert_eq!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSyn],
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck]
-                            );
-                            assert_eq!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck],
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSynAck2]
-                            );
-                            assert!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFin]
-                                    + tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFinPssv]
-                                    <= tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentAck4Fin]
-                            );
-                            assert!(
-                                tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFinPssv]
-                                    + tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFin]
-                                    <= tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
-                            );
+                assert_ne!(con_records.len(), 0);
+                if test_type == TestType::Server {
+                    for (p, (_, c_records)) in &con_records {
+                        match c_records {
+                            Some(c_records) if c_records.len() > 0 => {
+                                let mut completed_count = 0;
+                                let mut min = c_records.iter().last().unwrap();
+                                let mut max = min;
+                                c_records.iter().enumerate().for_each(|(i, c)| {
+                                    let line = format!("{:6}: {}\n", i, c);
+                                    f.write_all(line.as_bytes()).expect("cannot write c_records");
+                                    if c.release_cause() == ReleaseCause::ActiveClose
+                                        && c.states().last().unwrap() == &TcpState::Closed
+                                    {
+                                        completed_count += 1
+                                    }
+                                    if c.get_first_stamp().unwrap_or(u64::max_value())
+                                        < min.get_first_stamp().unwrap_or(u64::max_value())
+                                    {
+                                        min = c
+                                    }
+                                    if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
+                                        max = c
+                                    }
+                                    if i == (c_records.len() - 1)
+                                        && min.get_first_stamp().is_some()
+                                        && max.get_last_stamp().is_some()
+                                    {
+                                        let total = max.get_last_stamp().unwrap() - min.get_first_stamp().unwrap();
+                                        info!(
+                                            "total used cycles= {}, per connection = {}",
+                                            total.separated_string(),
+                                            (total / (i as u64 + 1)).separated_string()
+                                        );
+                                    }
+                                });
+                                println!("{} completed connections = {}", p, completed_count);
+                                assert_eq!(completed_count, tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSyn]);
+                            }
+                            _ => (),
                         }
-                        _ => (),
                     }
                 }
-            }
 
-            if test_type == TestType::Client {
-                for (p, (c_records, _)) in &con_records {
-                    let mut completed_count = 0;
-                    info!("Pipeline {}:", p);
-                    f.write_all(format!("Pipeline {}:\n", p).as_bytes())
-                        .expect("cannot write c_records");
-                    c_records.as_ref().unwrap().iter().enumerate().for_each(|(i, c)| {
-                        let line = format!("{:6}: {}\n", i, c);
-                        f.write_all(line.as_bytes()).expect("cannot write c_records");
-                        if c.release_cause() == ReleaseCause::PassiveClose && c.states().last().unwrap() == &TcpState::Closed
-                        {
-                            completed_count += 1
-                        };
-                    });
-                    assert_eq!(completed_count, tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentSyn]);
+                if test_type == TestType::Client {
+                    for (p, (c_records, _)) in &con_records {
+                        let mut completed_count = 0;
+                        info!("Pipeline {}:", p);
+                        f.write_all(format!("Pipeline {}:\n", p).as_bytes())
+                            .expect("cannot write c_records");
+                        c_records.as_ref().unwrap().iter().enumerate().for_each(|(i, c)| {
+                            let line = format!("{:6}: {}\n", i, c);
+                            f.write_all(line.as_bytes()).expect("cannot write c_records");
+                            if c.release_cause() == ReleaseCause::PassiveClose
+                                && c.states().last().unwrap() == &TcpState::Closed
+                            {
+                                completed_count += 1
+                            };
+                        });
+                        println!("{} completed connections = {}", p, completed_count);
+                        assert_eq!(completed_count, tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentSyn]);
+                    }
+                }
+
+                f.flush().expect("cannot flush BufWriter");
+            }
+            if test_type == TestType::Server {
+                for (p, _) in &tcp_counters_from {
+                    assert_eq!(
+                        tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSyn],
+                        tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck]
+                    );
+                    assert_eq!(
+                        tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentSynAck],
+                        tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvSynAck2]
+                    );
+                    assert!(
+                        tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFin]
+                            + tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvFinPssv]
+                            <= tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentAck4Fin]
+                    );
+                    assert!(
+                        tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFinPssv]
+                            + tcp_counters_from.get(&p).unwrap()[TcpStatistics::SentFin]
+                            <= tcp_counters_from.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
+                    );
+                }
+            } else {
+                for (p, _) in &tcp_counters_to {
+                    assert_eq!(
+                        tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentSyn],
+                        tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentSynAck2]
+                    );
+                    assert_eq!(
+                        tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentSynAck2],
+                        tcp_counters_to.get(&p).unwrap()[TcpStatistics::RecvSynAck]
+                    );
+                    assert!(
+                        tcp_counters_to.get(&p).unwrap()[TcpStatistics::RecvFin]
+                            + tcp_counters_to.get(&p).unwrap()[TcpStatistics::RecvFinPssv]
+                            <= tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentAck4Fin]
+                    );
+                    assert!(
+                        tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentFinPssv]
+                            + tcp_counters_to.get(&p).unwrap()[TcpStatistics::SentFin]
+                            <= tcp_counters_to.get(&p).unwrap()[TcpStatistics::RecvAck4Fin]
+                    );
                 }
             }
-
-            f.flush().expect("cannot flush BufWriter");
-
             mtx.send(MessageFrom::Exit).unwrap();
             thread::sleep(Duration::from_millis(2000));
-
+            println!("PASSED");
             debug!("terminating TrafficEngine");
             process::exit(0);
         }

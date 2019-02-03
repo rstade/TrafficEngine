@@ -15,15 +15,14 @@ use netfcts::timer_wheel::TimerWheel;
 use PipelineId;
 
 use netfcts::tcp_common::*;
-use netfcts::{RecordStore, ConRecord, ConRecordOperations, HasTcpState };
+use netfcts::{RecordStore, ConRecord, ConRecordOperations, HasTcpState, };
 use netfcts::utils::shuffle_ports;
 
 pub type TEngineStore = RecordStore<ConRecord>;
 
-#[derive(Clone)]
+//#[repr(align(64))]
 pub struct Connection {
-    con_rec: Option<usize>,
-    store: Option<Rc<RefCell<TEngineStore>>>,
+    record: Option<Box<DetailedRecord>>,
     pub wheel_slot_and_index: (u16, u16),
     /// next client side sequence no towards DUT
     pub seqn_nxt: u32,
@@ -31,32 +30,39 @@ pub struct Connection {
     pub seqn_una: u32,
     /// current ack no towards DUT (expected seqn)
     pub ackn_nxt: u32,
+    /// either our IP, if we are client, or IP of DUT if we are server
+    client_ip: u32,
+    /// either our port, if we are client, or port of DUT if we are server
+    client_port: u16,
+    server_index: u8,
+    state: TcpState,
 }
 
 const ERR_NO_CON_RECORD: &str = "connection has no ConRecord";
 
 impl Connection {
     #[inline]
-    fn initialize(
-        &mut self,
-        sock: Option<(u32, u16)>,
-        port: u16,
-        role: TcpRole,
-        store: Rc<RefCell<RecordStore<ConRecord>>>,
-    ) {
+    fn initialize(&mut self, client_sock: Option<(u32, u16)>, role: TcpRole) {
         self.seqn_nxt = 0;
         self.seqn_una = 0;
         self.ackn_nxt = 0;
+        let s = client_sock.unwrap_or((0, 0));
+        self.client_ip = s.0;
+        self.client_port = s.1;
         self.wheel_slot_and_index = (0, 0);
-        self.con_rec = Some(store.borrow_mut().get_unused_slot());
-        self.store = Some(store);
-        self.store
-            .as_ref()
-            .unwrap()
-            .borrow_mut()
-            .get_mut(self.con_rec())
-            .unwrap()
-            .init(role, port, sock);
+        self.server_index = 0;
+        self.state = tcp_start_state(role);
+    }
+
+    #[inline]
+    fn initialize_with_details(&mut self, sock: Option<(u32, u16)>, role: TcpRole, store: Rc<RefCell<TEngineStore>>) {
+        self.initialize(sock, role);
+        if self.record.is_none() {
+            self.record = Some(Box::new(DetailedRecord::new(store)));
+        } else {
+            self.record.as_mut().unwrap().re_new(store);
+        }
+        self.record.as_mut().unwrap().initialize(sock, role);
     }
 
     #[inline]
@@ -66,13 +72,170 @@ impl Connection {
             seqn_una: 0, // acked by DUT
             ackn_nxt: 0, //next ackn towards DUT
             wheel_slot_and_index: (0, 0),
-            con_rec: None,
-            store: None,
+            client_port: 0,
+            client_ip: 0,
+            server_index: 0,
+            record: None,
+            state: TcpState::Listen,
+        }
+    }
+
+    #[inline]
+    pub fn push_state(&mut self, state: TcpState) {
+        if self.record.is_some() {
+            self.record.as_mut().unwrap().push_state(state)
+        }
+        self.state = state;
+    }
+
+    #[inline]
+    pub fn state(&self) -> TcpState {
+        self.state
+    }
+
+    #[inline]
+    pub fn states(&self) -> Vec<TcpState> {
+        if self.record.is_some() {
+            self.record.as_ref().unwrap().states()
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[inline]
+    pub fn sock(&self) -> Option<(u32, u16)> {
+        let s = (self.client_ip, self.client_port);
+        if self.in_use() {
+            Some(s)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn set_sock(&mut self, s: (u32, u16)) {
+        self.client_ip = s.0;
+        self.client_port = s.1;
+    }
+
+    #[inline]
+    pub fn port(&self) -> u16 {
+        self.client_port
+    }
+
+    #[inline]
+    fn in_use(&self) -> bool {
+        self.client_port != 0
+    }
+
+    #[inline]
+    pub fn server_index(&self) -> usize {
+        self.server_index as usize
+    }
+
+    #[inline]
+    pub fn set_server_index(&mut self, index: usize) {
+        self.server_index = index as u8;
+    }
+
+
+    #[inline]
+    pub fn set_release_cause(&mut self, cause: ReleaseCause) {
+        if self.record.is_some() {
+            self.record.as_mut().unwrap().set_release_cause(cause)
+        }
+    }
+
+    #[inline]
+    pub fn increment_payload_packets(&mut self) -> usize {
+        if self.record.is_some() {
+            self.record.as_mut().unwrap().increment_payload_packets()
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    pub fn payload_packets(&self) -> usize {
+        if self.record.is_some() {
+            self.record.as_ref().unwrap().payload_packets()
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    fn release(&mut self) {
+        self.client_port = 0;
+        if self.record.is_some() {
+            self.record.as_mut().unwrap().release();
+        }
+    }
+
+
+    #[inline]
+    pub fn set_uid(&mut self, uid: u64) {
+        if self.record.is_some() {
+            self.record.as_mut().unwrap().set_uid(uid);
+        }
+    }
+
+    #[inline]
+    pub fn uid(&self) -> u64 {
+        if self.record.is_some() {
+            self.record.as_ref().unwrap().get_uid()
+        } else {
+            0
         }
     }
 }
 
-impl ConRecordOperations<TEngineStore> for Connection {
+impl<'a> Clone for Connection {
+    fn clone(&self) -> Self {
+        Connection::new()
+    }
+}
+
+pub struct DetailedRecord {
+    con_rec: Option<usize>,
+    store: Option<Rc<RefCell<TEngineStore>>>,
+}
+
+
+impl DetailedRecord {
+    #[inline]
+    fn initialize(&mut self, client_sock: Option<(u32, u16)>, role: TcpRole) {
+        self.store().borrow_mut().get_mut(self.con_rec()).init(role, 0, client_sock);
+    }
+
+    fn new(store: Rc<RefCell<TEngineStore>>) -> DetailedRecord {
+        let con_rec = store.borrow_mut().get_next_slot();
+        DetailedRecord {
+            con_rec: Some(con_rec),
+            store: Some(store),
+        }
+    }
+
+    fn re_new(&mut self, store: Rc<RefCell<TEngineStore>>) {
+        let con_rec = store.borrow_mut().get_next_slot();
+        self.con_rec= Some(con_rec);
+        self.store= Some(store);
+    }
+
+    #[inline]
+    pub fn push_state(&mut self, state: TcpState) {
+        self.store().borrow_mut().get_mut(self.con_rec()).push_state(state);
+    }
+
+    #[inline]
+    fn release(&mut self) {
+        //trace!("releasing con record on port {}", self.port());
+        self.con_rec = None;
+        self.store = None;
+    }
+}
+
+impl ConRecordOperations<TEngineStore> for DetailedRecord {
     #[inline]
     fn store(&self) -> &Rc<RefCell<TEngineStore>> {
         self.store.as_ref().unwrap()
@@ -84,13 +247,6 @@ impl ConRecordOperations<TEngineStore> for Connection {
     }
 
     #[inline]
-    fn release_conrec(&mut self) {
-        //trace!("releasing con record on port {}", self.port());
-        self.con_rec = None;
-        self.store = None;
-    }
-
-    #[inline]
     fn in_use(&self) -> bool {
         self.store.is_some()
     }
@@ -98,24 +254,14 @@ impl ConRecordOperations<TEngineStore> for Connection {
 
 impl fmt::Display for Connection {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Connection(s-port={}, {:?})",
-            self.port(),
-            self.store()
-                .borrow_mut()
-                .get_mut(self.con_rec.expect("connection has no ConRecord"))
-                .unwrap()
-                .states(),
-            //self.con_rec().s_states(),
-        )
+        write!(f, "Connection(sock={:?}, state={:?})", self.sock(), self.state(),)
     }
 }
 
 pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
 
 pub struct ConnectionManagerC {
-    c_record_store: Rc<RefCell<RecordStore<ConRecord>>>,
+    c_record_store: Option<Rc<RefCell<RecordStore<ConRecord>>>>,
     free_ports: VecDeque<u16>,
     ready: VecDeque<u16>,
     /// min number of free ports
@@ -129,20 +275,31 @@ pub struct ConnectionManagerC {
     // e.g. used as a listen port, not assigned by create
     listen_port: u16,
     ip: u32, // ip address to use for connections of this manager
+    /// with or without recording of connections
+    detailed_records: bool,
 }
 
 const MAX_CONNECTIONS: usize = 0xFFFF as usize;
 const MAX_RECORDS: usize = 0x3FFFF as usize;
 
 impl ConnectionManagerC {
-    pub fn new(pipeline_id: PipelineId, pci: CacheAligned<PortQueue>, l4flow: &L4Flow) -> ConnectionManagerC {
+    pub fn new(
+        pipeline_id: PipelineId,
+        pci: CacheAligned<PortQueue>,
+        l4flow: &L4Flow,
+        detailed_records: bool,
+    ) -> ConnectionManagerC {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
         let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();
         let max_tcp_port: u16 = tcp_port_base + !port_mask;
-        let store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
+        let store = if detailed_records {
+            Some(Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS))))
+        } else {
+            None
+        };
         let cm = ConnectionManagerC {
-            c_record_store: store.clone(),
+            c_record_store: store,
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
             // port 0 is reserved and not usable for us, ports are shuffled for better load sharing in DUTs
             // max_tcp_port itself is reserved for the server side for listening
@@ -158,6 +315,7 @@ impl ConnectionManagerC {
             tcp_port_base,
             listen_port: max_tcp_port,
             ip,
+            detailed_records,
         };
         // we use the port max_tcp_port for returning traffic to us, do not add it to free_ports
         info!(
@@ -192,8 +350,12 @@ impl ConnectionManagerC {
             let port = opt_port.unwrap();
             {
                 let sock = (self.ip, port);
-                let store = Rc::clone(&self.c_record_store);
-                self.get_mut_con(&port).initialize(Some(sock), port, role, store);
+                if self.detailed_records {
+                    let store = Rc::clone(self.c_record_store.as_ref().unwrap());
+                    self.get_mut_con(&port).initialize_with_details(Some(sock), role, store);
+                } else {
+                    self.get_mut_con(&port).initialize(Some(sock), role);
+                }
             }
             self.min_free_ports = cmp::min(self.min_free_ports, self.free_ports.len());
             Some(self.get_mut_con(&port))
@@ -276,7 +438,7 @@ impl ConnectionManagerC {
                 c.push_state(TcpState::Closed);
                 debug!("timing out port {} at {:?}", port, c.wheel_slot_and_index);
                 // now we release the connection inline (cannot call self.release)
-                c.release_conrec();
+                c.release();
             }
         }
         if in_use {
@@ -289,8 +451,8 @@ impl ConnectionManagerC {
         let c = &mut self.port2con[(port - self.tcp_port_base) as usize];
         // only if it is in use, i.e. it has been not released already
         if c.in_use() {
-            self.free_ports.push_front(port);
-            c.release_conrec();
+            self.free_ports.push_back(port);
+            c.release();
             //remove port from timer wheel by overwriting it
             let old = wheel.replace(c.wheel_slot_and_index, 0);
             assert_eq!(old.unwrap(), port);
@@ -300,21 +462,25 @@ impl ConnectionManagerC {
 
     #[allow(dead_code)]
     pub fn dump_records(&mut self) {
-        info!(
-            "{}: {:6} closed connections",
-            self.pipeline_id,
-            self.c_record_store.borrow().len()
-        );
-        self.c_record_store
-            .borrow()
-            .iter()
-            .enumerate()
-            .for_each(|(i, c)| debug!("{:6}: {}", i, c));
-        info!(
-            "{}: {:6} open connections",
-            self.pipeline_id,
-            self.port2con.iter().filter(|c| c.port() != 0).collect::<Vec<_>>().len()
-        );
+        if self.c_record_store.is_some() {
+            info!(
+                "{}: {:6} closed connections",
+                self.pipeline_id,
+                self.c_record_store.as_ref().unwrap().borrow().len()
+            );
+            self.c_record_store
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .iter()
+                .enumerate()
+                .for_each(|(i, c)| debug!("{:6}: {}", i, c));
+            info!(
+                "{}: {:6} open connections",
+                self.pipeline_id,
+                self.port2con.iter().filter(|c| c.port() != 0).collect::<Vec<_>>().len()
+            );
+        }
         /*
         self.port2con.iter().enumerate().for_each(|(i, c)| {
             if c.port() != 0 {
@@ -326,18 +492,22 @@ impl ConnectionManagerC {
 
     pub fn fetch_c_records(&mut self) -> Option<RecordStore<ConRecord>> {
         // we are "moving" the con_records out, and replace it with a new one
-        let new_store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
-        let store = mem::replace(&mut self.c_record_store, new_store);
-        let strong_count = Rc::strong_count(&store);
-        debug!("cm_s.fetch_c_records: strong_count= { }", strong_count);
-        if strong_count > 1 {
-            for c in &mut self.port2con {
-                c.release_conrec();
+        if self.c_record_store.is_some() {
+            let new_store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
+            let store = mem::replace(self.c_record_store.as_mut().unwrap(), new_store);
+            let strong_count = Rc::strong_count(&store);
+            debug!("cm_s.fetch_c_records: strong_count= { }", strong_count);
+            if strong_count > 1 {
+                for c in &mut self.port2con {
+                    c.release();
+                }
             }
-        }
-        let unwrapped = Rc::try_unwrap(store);
-        if unwrapped.is_ok() {
-            Some(unwrapped.unwrap().into_inner())
+            let unwrapped = Rc::try_unwrap(store);
+            if unwrapped.is_ok() {
+                Some(unwrapped.unwrap().into_inner())
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -360,7 +530,7 @@ impl ConnectionManagerC {
                 Some(port) => {
                     let c = &self.port2con[(port - self.tcp_port_base) as usize];
                     trace!("found ready connection {}", if c.in_use() { c.port() } else { 0 });
-                    if c.in_use() && c.last_state() == TcpState::Established {
+                    if c.in_use() && c.state() == TcpState::Established {
                         port_result = Some(port)
                     }
                 }
@@ -380,7 +550,7 @@ use netfcts::utils::Sock2Index as Sock2Index;
 use std::cmp;
 
 pub struct ConnectionManagerS {
-    c_record_store: Rc<RefCell<RecordStore<ConRecord>>>,
+    c_record_store: Option<Rc<RefCell<RecordStore<ConRecord>>>>,
     sock2index: Sock2Index,
     //sock2index: HashMap<(u32,u16), u16>,
     //sock2index: BTreeMap<(u32,u16), u16>,
@@ -389,10 +559,14 @@ pub struct ConnectionManagerS {
 }
 
 impl ConnectionManagerS {
-    pub fn new() -> ConnectionManagerS {
-        let store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
+    pub fn new(detailed_records: bool) -> ConnectionManagerS {
+        let store = if detailed_records {
+            Some(Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS))))
+        } else {
+            None
+        };
         ConnectionManagerS {
-            c_record_store: store.clone(),
+            c_record_store: store,
             sock2index: Sock2Index::new(),
             //sock2index: HashMap::with_capacity(MAX_CONNECTIONS),
             //sock2index: BTreeMap::new(),
@@ -429,7 +603,15 @@ impl ConnectionManagerS {
         if index.is_some() {
             self.sock2index.insert(*sock, index.unwrap() as u16);
             let c = &mut self.connections[index.unwrap()];
-            c.initialize(Some(*sock), 0, TcpRole::Server, Rc::clone(&self.c_record_store));
+            if self.c_record_store.is_some() {
+                c.initialize_with_details(
+                    Some(*sock),
+                    TcpRole::Server,
+                    Rc::clone(&self.c_record_store.as_ref().unwrap()),
+                );
+            } else {
+                c.initialize(Some(*sock), TcpRole::Server)
+            }
             Some(c)
         } else {
             None // out of resources
@@ -442,12 +624,12 @@ impl ConnectionManagerS {
         if index.is_some() {
             let c = &mut self.connections[index.unwrap() as usize];
             if c.in_use() {
-                self.free_slots.push_front(index.unwrap() as usize);
+                self.free_slots.push_back(index.unwrap() as usize);
                 //remove port from timer wheel by overwriting it
                 let old = wheel.replace(c.wheel_slot_and_index, (0, 0));
                 assert_eq!(old.unwrap(), *sock);
             }
-            c.release_conrec();
+            c.release();
             // we keep unused connection in port2con table
         }
     }
@@ -490,30 +672,34 @@ impl ConnectionManagerS {
                 if in_use {
                     c.set_release_cause(ReleaseCause::Timeout);
                     c.push_state(TcpState::Closed);
-                    c.release_conrec();
+                    c.release();
                 }
             }
         }
         if in_use {
             let index = self.sock2index.remove(sock);
-            self.free_slots.push_front(index.unwrap() as usize);
+            self.free_slots.push_back(index.unwrap() as usize);
         }
     }
 
     pub fn fetch_c_records(&mut self) -> Option<RecordStore<ConRecord>> {
-        // we are "moving" the con_records out, and replace it with a new one
-        let new_store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
-        let store = mem::replace(&mut self.c_record_store, new_store);
-        let strong_count = Rc::strong_count(&store);
-        debug!("cm_s.fetch_c_records: strong_count= { }", strong_count);
-        if strong_count > 1 {
-            for c in &mut self.connections {
-                c.release_conrec();
+        if self.c_record_store.is_some() {
+            // we are "moving" the con_records out, and replace it with a new one
+            let new_store = Rc::new(RefCell::new(RecordStore::with_capacity(MAX_RECORDS)));
+            let store = mem::replace(self.c_record_store.as_mut().unwrap(), new_store);
+            let strong_count = Rc::strong_count(&store);
+            debug!("cm_s.fetch_c_records: strong_count= { }", strong_count);
+            if strong_count > 1 {
+                for c in &mut self.connections {
+                    c.release();
+                }
             }
-        }
-        let unwrapped = Rc::try_unwrap(store);
-        if unwrapped.is_ok() {
-            Some(unwrapped.unwrap().into_inner())
+            let unwrapped = Rc::try_unwrap(store);
+            if unwrapped.is_ok() {
+                Some(unwrapped.unwrap().into_inner())
+            } else {
+                None
+            }
         } else {
             None
         }
