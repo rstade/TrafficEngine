@@ -15,7 +15,7 @@ use netfcts::timer_wheel::TimerWheel;
 use PipelineId;
 
 use netfcts::tcp_common::*;
-use netfcts::{RecordStore, ConRecord, ConRecordOperations, HasTcpState, };
+use netfcts::{RecordStore, ConRecord, ConRecordOperations, HasTcpState};
 use netfcts::utils::shuffle_ports;
 
 pub type TEngineStore = RecordStore<ConRecord>;
@@ -135,6 +135,9 @@ impl Connection {
 
     #[inline]
     pub fn set_server_index(&mut self, index: usize) {
+        if self.record.is_some() {
+            self.record.as_mut().unwrap().set_server_index(index)
+        }
         self.server_index = index as u8;
     }
 
@@ -218,8 +221,8 @@ impl DetailedRecord {
 
     fn re_new(&mut self, store: Rc<RefCell<TEngineStore>>) {
         let con_rec = store.borrow_mut().get_next_slot();
-        self.con_rec= Some(con_rec);
-        self.store= Some(store);
+        self.con_rec = Some(con_rec);
+        self.store = Some(store);
     }
 
     #[inline]
@@ -254,7 +257,7 @@ impl ConRecordOperations<TEngineStore> for DetailedRecord {
 
 impl fmt::Display for Connection {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Connection(sock={:?}, state={:?})", self.sock(), self.state(),)
+        write!(f, "Connection(sock={:?}, state={:?})", self.sock(), self.state(), )
     }
 }
 
@@ -272,9 +275,11 @@ pub struct ConnectionManagerC {
     // the PortQueue for which connections are managed
     pipeline_id: PipelineId,
     tcp_port_base: u16,
+    no_available_ports: usize,
     // e.g. used as a listen port, not assigned by create
     listen_port: u16,
-    ip: u32, // ip address to use for connections of this manager
+    ip: u32,
+    // ip address to use for connections of this manager
     /// with or without recording of connections
     detailed_records: bool,
 }
@@ -298,6 +303,7 @@ impl ConnectionManagerC {
         } else {
             None
         };
+        let avail_ports;
         let cm = ConnectionManagerC {
             c_record_store: store,
             port2con: vec![Connection::new(); (!port_mask + 1) as usize],
@@ -306,8 +312,10 @@ impl ConnectionManagerC {
             free_ports: {
                 let vec = shuffle_ports(if tcp_port_base == 0 { 1 } else { tcp_port_base }, max_tcp_port - 1);
                 //let vec = (if tcp_port_base == 0 { 1 } else { tcp_port_base }.. max_tcp_port - 1).collect();
+                avail_ports = vec.len();
                 VecDeque::<u16>::from(vec)
             },
+            no_available_ports: avail_ports,
             ready: VecDeque::with_capacity(MAX_CONNECTIONS), // connections which became Established (but may not longer be)
             min_free_ports: !port_mask as usize + 1,
             pci,
@@ -332,8 +340,19 @@ impl ConnectionManagerC {
 
     #[inline]
     pub fn max_concurrent_connections(&self) -> usize {
-        (!self.pci.port.get_tcp_dst_port_mask() - (if self.tcp_port_base == 0 { 1 } else { 0 })) as usize
+//        (!self.pci.port.get_tcp_dst_port_mask() - (if self.tcp_port_base == 0 { 1 } else { 0 })) as usize
+        self.no_available_ports
             - self.min_free_ports
+    }
+
+    #[inline]
+    pub fn concurrent_connections(&self) -> usize {
+        self.no_available_ports - self.free_ports.len()
+    }
+
+    #[inline]
+    pub fn no_available_ports(&self) -> usize {
+        self.no_available_ports
     }
 
 

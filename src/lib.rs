@@ -86,6 +86,7 @@ pub struct EngineConfig {
     pub timeouts: Option<Timeouts>,
     pub port: u16,
     pub cps_limit: Option<u64>,
+    pub max_open: Option<usize>,
     pub detailed_records: Option<bool>,
 }
 

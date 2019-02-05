@@ -43,6 +43,7 @@ const MIN_FRAME_SIZE: usize = 60;
 const TIMER_WHEEL_RESOLUTION_MS: u64 = 10;
 const TIMER_WHEEL_SLOTS: usize = 1001;
 const TIMER_WHEEL_SLOT_CAPACITY: usize = 2500;
+const SEQN_SHIFT: usize = 4;
 
 pub fn setup_generator(
     core: i32,
@@ -72,6 +73,7 @@ pub fn setup_generator(
     let mut cm_s = ConnectionManagerS::new(detailed_records);
 
     let mut timeouts = Timeouts::default_or_some(&engine_config.timeouts);
+    let max_open = engine_config.max_open.unwrap_or(cm_c.no_available_ports());
 
     let mut wheel_c = TimerWheel::new(
         TIMER_WHEEL_SLOTS,
@@ -122,8 +124,56 @@ pub fn setup_generator(
     let mut start_stamp: u64 = 0;
     let mut stop_stamp: u64 = 0;
     let mut counter_from = TcpCounter::new();
+
+    struct HoldingTime {
+        // in cycles
+        sum: u64,
+        count: u64,
+        max: u64,
+        at: u64,
+    }
+
+    impl HoldingTime {
+        fn new() -> HoldingTime {
+            HoldingTime {
+                sum: 0,
+                count: 0,
+                max: 0,
+                at: 0,
+            }
+        }
+
+        #[inline]
+        fn add_hold(&mut self, start_low28bit: u32) {
+            let mut now = (utils::rdtscp_unsafe() & 0x000000000FFFFFFF) as u32;
+            if now <= start_low28bit {
+                // at least one overflow
+                now += 0x10000000;
+            }
+            let h = (now - start_low28bit) as u64;
+            self.sum += h;
+            self.count += 1;
+            if h > self.max {
+                self.max = h;
+                self.at = self.count;
+            }
+        }
+
+        #[inline]
+        fn mean(&self) -> u64 {
+            if self.count > 0 { self.sum / self.count } else { 0 }
+        }
+
+        #[inline]
+        fn max_at(&self) -> (u64, u64) {
+            (self.max, self.at)
+        }
+    }
+
+    let mut hold = HoldingTime::new();
+
     #[cfg(feature = "profiling")]
-    let mut rx_tx_stats = Vec::with_capacity(10000);
+        let mut rx_tx_stats = Vec::with_capacity(10000);
 
     // we create SYN and Payload packets and merge them with the upstream coming from the pci i/f
     // the destination port of the created tcp packets is used as discriminator in the pipeline (dst_port 1 is for SYN packet generation)
@@ -139,7 +189,7 @@ pub fn setup_generator(
             system_data.cpu_clock / engine_config.cps_limit() * 32,
             1u16,
         )
-        .set_start_delay(system_data.cpu_clock / 100),
+            .set_start_delay(system_data.cpu_clock / 100),
     );
     tx.send(MessageFrom::Task(pipeline_id.clone(), injector_uuid, TaskType::TcpGenerator))
         .unwrap();
@@ -157,7 +207,7 @@ pub fn setup_generator(
             system_data.cpu_clock / engine_config.cps_limit() * 32,
             2u16,
         )
-        .set_start_delay(system_data.cpu_clock / 100),
+            .set_start_delay(system_data.cpu_clock / 100),
     );
     tx.send(MessageFrom::Task(pipeline_id.clone(), injector_uuid, TaskType::TcpGenerator))
         .unwrap();
@@ -191,17 +241,17 @@ pub fn setup_generator(
     let rxq = pci.rxq();
     let csum_offload = pci.port.csum_offload();
     #[cfg(feature = "profiling")]
-    let tx_stats = pci.tx_stats();
+        let tx_stats = pci.tx_stats();
     #[cfg(feature = "profiling")]
-    let rx_stats = pci.rx_stats();
+        let rx_stats = pci.rx_stats();
     let uuid_l4groupby = Uuid::new_v4();
     let uuid_l4groupby_clone = uuid_l4groupby.clone();
     let pipeline_id_clone = pipeline_id.clone();
 
     #[cfg(feature = "profiling")]
-    let sample_size = nr_connections as u64 / 2;
+        let sample_size = nr_connections as u64 / 2;
     #[cfg(feature = "profiling")]
-    let mut time_adders = [
+        let mut time_adders = [
         TimeAdder::new("cmanager_c", sample_size * 2),
         TimeAdder::new_with_warm_up("s_recv_syn", sample_size, 100),
         TimeAdder::new("s_recv_syn_ack2", sample_size),
@@ -316,7 +366,7 @@ pub fn setup_generator(
             set_header(&servers[c.server_index()], c.port(), h, &me.mac, me.ip);
 
             //generate seq number:
-            c.seqn_nxt = (utils::rdtsc_unsafe() << 8) as u32;
+            c.seqn_nxt = (utils::rdtsc_unsafe() << SEQN_SHIFT) as u32;
             h.tcp.set_seq_num(c.seqn_nxt);
             c.seqn_nxt = c.seqn_nxt.wrapping_add(1);
             h.tcp.set_syn_flag();
@@ -443,7 +493,7 @@ pub fn setup_generator(
         // *****  the closure starts here with processing
 
         #[cfg(feature = "profiling")]
-        let timestamp_entry = utils::rdtsc_unsafe();
+            let timestamp_entry = utils::rdtsc_unsafe();
 
         let pipeline_ip = cm_c.ip();
         let tcp_port_base = cm_c.tcp_port_base();
@@ -507,22 +557,24 @@ pub fn setup_generator(
                     start_stamp = utils::rdtscp_unsafe()
                 }
                 if counter_to[TcpStatistics::SentSyn] < nr_connections {
-                    if let Some(c) = cm_c.create(TcpRole::Client) {
-                        generate_syn(
-                            p,
-                            c,
-                            &mut hs,
-                            &me,
-                            &servers,
-                            &pipeline_id_clone,
-                            &mut counter_to[TcpStatistics::SentSyn],
-                        );
-                        c.push_state(TcpState::SynSent);
-                        c.wheel_slot_and_index =
-                            wheel_c.schedule(&(timeouts.established.unwrap() * system_data.cpu_clock / 1000), c.port());
-                        group_index = 1;
-                        #[cfg(feature = "profiling")]
-                        time_adders[4].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                    if cm_c.concurrent_connections() < max_open {
+                        if let Some(c) = cm_c.create(TcpRole::Client) {
+                            generate_syn(
+                                p,
+                                c,
+                                &mut hs,
+                                &me,
+                                &servers,
+                                &pipeline_id_clone,
+                                &mut counter_to[TcpStatistics::SentSyn],
+                            );
+                            c.push_state(TcpState::SynSent);
+                            c.wheel_slot_and_index =
+                                wheel_c.schedule(&(timeouts.established.unwrap() * system_data.cpu_clock / 1000), c.port());
+                            group_index = 1;
+                            #[cfg(feature = "profiling")]
+                                time_adders[4].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                        }
                     }
                 } else {
                     if syn_injector_runs() {
@@ -543,7 +595,7 @@ pub fn setup_generator(
                     counter_to[TcpStatistics::Payload] += 1;
                     group_index = 1;
                     #[cfg(feature = "profiling")]
-                    time_adders[5].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                        time_adders[5].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                 } else {
                     if payload_injector_runs() {
                         payload_injector_stop();
@@ -558,7 +610,7 @@ pub fn setup_generator(
                 match rx.try_recv() {
                     Ok(MessageTo::FetchCounter) => {
                         #[cfg(feature = "profiling")]
-                        tx_clone
+                            tx_clone
                             .send(MessageFrom::Counter(
                                 pipeline_id_clone.clone(),
                                 counter_to.clone(),
@@ -567,7 +619,7 @@ pub fn setup_generator(
                             ))
                             .unwrap();
                         #[cfg(not(feature = "profiling"))]
-                        tx_clone
+                            tx_clone
                             .send(MessageFrom::Counter(
                                 pipeline_id_clone.clone(),
                                 counter_to.clone(),
@@ -576,9 +628,12 @@ pub fn setup_generator(
                             ))
                             .unwrap();
                         info!(
-                            "{} max concurrent client connections= {}",
+                            "{} max concurrent client connections= {}, mean holding time = {}, max holding time = {} @ {}",
                             thread_id,
-                            cm_c.max_concurrent_connections()
+                            cm_c.max_concurrent_connections(),
+                            hold.mean(),
+                            hold.max_at().0,
+                            hold.max_at().1
                         )
                     }
                     Ok(MessageTo::FetchCRecords) => {
@@ -593,7 +648,7 @@ pub fn setup_generator(
                     }
                     _ => {}
                 }
-                // check if we ready and both time stamps are set:
+                // check if we are ready and both time stamps are set:
                 if start_stamp > 0 && stop_stamp > 0 {
                     tx_clone
                         .send(MessageFrom::TimeStamps(pipeline_id_clone.clone(), start_stamp, stop_stamp))
@@ -607,17 +662,17 @@ pub fn setup_generator(
                     cm_s.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_s);
                 }
                 #[cfg(feature = "profiling")]
-                {
-                    let tx_stats_now = tx_stats.stats.load(Ordering::Relaxed);
-                    let rx_stats_now = rx_stats.stats.load(Ordering::Relaxed);
-                    // only save changes
-                    if rx_tx_stats.last().is_none()
-                        || tx_stats_now != rx_tx_stats.last().unwrap().2
-                        || rx_stats_now != rx_tx_stats.last().unwrap().1
                     {
-                        rx_tx_stats.push((utils::rdtsc_unsafe(), rx_stats_now, tx_stats_now));
+                        let tx_stats_now = tx_stats.stats.load(Ordering::Relaxed);
+                        let rx_stats_now = rx_stats.stats.load(Ordering::Relaxed);
+                        // only save changes
+                        if rx_tx_stats.last().is_none()
+                            || tx_stats_now != rx_tx_stats.last().unwrap().2
+                            || rx_stats_now != rx_tx_stats.last().unwrap().1
+                        {
+                            rx_tx_stats.push((utils::rdtsc_unsafe(), rx_stats_now, tx_stats_now));
+                        }
                     }
-                }
             }
             (ETYPE_IPV4, dst_port) if dst_port == server_listen_port => {
                 //server side
@@ -629,7 +684,7 @@ pub fn setup_generator(
                     counter_from[TcpStatistics::RecvSyn] += 1;
                     let c = cm_s.get_mut_or_insert(&src_sock);
                     #[cfg(feature = "profiling")]
-                    time_adders[11].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                        time_adders[11].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                     c
                 } else {
                     cm_s.get_mut(&src_sock)
@@ -663,7 +718,7 @@ pub fn setup_generator(
                                 counter_from[TcpStatistics::SentSynAck] += 1;
                                 group_index = 1;
                                 #[cfg(feature = "profiling")]
-                                time_adders[1].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                    time_adders[1].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                             } else {
                                 warn!("{} received SYN in state {:?}", thread_id, c.states());
                             }
@@ -681,7 +736,7 @@ pub fn setup_generator(
                                 group_index = 1;
                             }
                             #[cfg(feature = "profiling")]
-                            time_adders[8].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[8].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                         } else if hs.tcp.rst_flag() {
                             trace!("received RST");
                             counter_from[TcpStatistics::RecvRst] += 1;
@@ -696,7 +751,7 @@ pub fn setup_generator(
                                     counter_from[TcpStatistics::RecvSynAck2] += 1;
                                     debug!("{} connection from DUT ({:?}) established", thread_id, src_sock);
                                     #[cfg(feature = "profiling")]
-                                    time_adders[2].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                        time_adders[2].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                                 }
                                 TcpState::LastAck => {
                                     // received final ack in passive close
@@ -743,7 +798,7 @@ pub fn setup_generator(
                                 c.ackn_nxt = hs.tcp.seq_num().wrapping_add(hs.tcp_payload_len() as u32);
                             }
                             #[cfg(feature = "profiling")]
-                            time_adders[3].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[3].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                         }
                     }
                 }
@@ -756,7 +811,7 @@ pub fn setup_generator(
                 }
                 let mut c = cm_c.get_mut_by_port(client_port);
                 #[cfg(feature = "profiling")]
-                time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                    time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                 match c {
                     None => {
                         warn!(
@@ -817,7 +872,7 @@ pub fn setup_generator(
                                 group_index = 1;
                             }
                             #[cfg(feature = "profiling")]
-                            time_adders[7].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[7].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                         } else if hs.tcp.rst_flag() {
                             counter_to[TcpStatistics::RecvRst] += 1;
                             c.push_state(TcpState::Closed);
@@ -829,6 +884,7 @@ pub fn setup_generator(
                             if counter_to[TcpStatistics::RecvAck4Fin] == nr_connections {
                                 stop_stamp = utils::rdtscp_unsafe()
                             }
+                            hold.add_hold(c.seqn_nxt >> SEQN_SHIFT);
                             c.push_state(TcpState::Closed);
                             c.set_release_cause(ReleaseCause::PassiveClose);
                             // release connection in the next block
@@ -857,12 +913,12 @@ pub fn setup_generator(
         if b_release_connection_s {
             cm_s.release(&src_sock, &mut wheel_s);
             #[cfg(feature = "profiling")]
-            time_adders[10].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+                time_adders[10].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
         }
         if b_release_connection_c {
             cm_c.release(hs.tcp.dst_port(), &mut wheel_c);
             #[cfg(feature = "profiling")]
-            time_adders[9].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+                time_adders[9].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
         }
         if let Some(sport) = ready_connection {
             trace!("{} connection on port {} is ready", thread_id, sport);
@@ -872,7 +928,7 @@ pub fn setup_generator(
                 payload_injector_start();
             }
             #[cfg(feature = "profiling")]
-            time_adders[6].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                time_adders[6].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
         }
         group_index
     };
