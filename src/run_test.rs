@@ -32,6 +32,7 @@ use env_logger;
 //use serde_json;
 use separator::Separatable;
 use netfcts::{initialize_flowdirector, FlowSteeringMode};
+use netfcts::comm::PipelineId;
 use netfcts::{HasTcpState};
 
 use read_config;
@@ -235,7 +236,7 @@ pub fn run_test(test_type: TestType) {
             }
             // start generator
             mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-            thread::sleep(Duration::from_millis(1000 as u64));
+            thread::sleep(Duration::from_millis(2000 as u64));
 
             if test_type == TestType::Server {
                 let timeout = Duration::from_millis(1000 as u64);
@@ -272,16 +273,6 @@ pub fn run_test(test_type: TestType) {
                             match stream.write(&format!("{} stars", ntry).to_string().into_bytes()) {
                                 Ok(_) => {
                                     debug!("successfully send {} stars", ntry);
-                                    /* let mut buf = [0u8; 256];
-                                    match stream.read(&mut buf[..]) {
-                                        Ok(_) => {
-                                            info!("on try {} we received {}", ntry, String::from_utf8(buf.to_vec()).unwrap())
-                                        }
-                                        _ => {
-                                            panic!("timeout on connection {} while waiting for answer", ntry);
-                                        }
-                                    };
-                                    */
                                 }
                                 _ => {
                                     panic!("error when writing to test connection {}", ntry);
@@ -299,12 +290,8 @@ pub fn run_test(test_type: TestType) {
             thread::sleep(Duration::from_millis(1000 as u64));
             mtx.send(MessageFrom::PrintPerformance(cores)).unwrap();
             thread::sleep(Duration::from_millis(100 as u64));
-            //main loop
-            /* println!("press ctrl-c to terminate proxy ...");
-            while running.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-            }
-            */
+
+
             mtx.send(MessageFrom::FetchCounter).unwrap();
             if configuration.engine.detailed_records.unwrap_or(false) {
                 mtx.send(MessageFrom::FetchCRecords).unwrap();
@@ -314,6 +301,7 @@ pub fn run_test(test_type: TestType) {
             let mut tcp_counters_to = HashMap::new();
             let mut tcp_counters_from = HashMap::new();
             let mut con_records = HashMap::new();
+            let mut start_stop_stamps: HashMap<PipelineId, (u64, u64)> = HashMap::new();
 
             loop {
                 match reply_mrx.recv_timeout(Duration::from_millis(1000)) {
@@ -326,6 +314,9 @@ pub fn run_test(test_type: TestType) {
                     }
                     Ok(MessageTo::CRecords(pipeline_id, c_records_client, c_records_server)) => {
                         con_records.insert(pipeline_id, (c_records_client, c_records_server));
+                    }
+                    Ok(MessageTo::TimeStamps(p, t_start, t_stop)) => {
+                        start_stop_stamps.insert(p.clone(), (t_start, t_stop));
                     }
                     Ok(_m) => error!("illegal MessageTo received from reply_to_main channel"),
                     Err(RecvTimeoutError::Timeout) => {
@@ -398,7 +389,8 @@ pub fn run_test(test_type: TestType) {
                         c_records.as_ref().unwrap().iter().enumerate().for_each(|(i, c)| {
                             let line = format!("{:6}: {}\n", i, c);
                             f.write_all(line.as_bytes()).expect("cannot write c_records");
-                            if c.release_cause() == ReleaseCause::PassiveClose
+                            if (c.release_cause() == ReleaseCause::PassiveClose
+                                || c.release_cause() == ReleaseCause::ActiveClose)
                                 && c.states().last().unwrap() == &TcpState::Closed
                             {
                                 completed_count += 1

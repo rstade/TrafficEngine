@@ -7,9 +7,11 @@ use std::fmt;
 use std::mem;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::{PacketRx, PortQueue, L4Flow};
+use e2d2::interface::{PortQueue, L4Flow};
 
 use netfcts::timer_wheel::TimerWheel;
 use PipelineId;
@@ -26,12 +28,13 @@ pub struct Connection {
     pub wheel_slot_and_index: (u16, u16),
     /// next client side sequence no towards DUT
     pub seqn_nxt: u32,
-    /// oldest unacknowledged sequence no
-    pub seqn_una: u32,
+    // oldest unacknowledged sequence no
+//    pub seqn_una: u32,
     /// current ack no towards DUT (expected seqn)
     pub ackn_nxt: u32,
     /// either our IP, if we are client, or IP of DUT if we are server
     client_ip: u32,
+    payload_packets: u32,
     /// either our port, if we are client, or port of DUT if we are server
     client_port: u16,
     server_index: u8,
@@ -44,13 +47,14 @@ impl Connection {
     #[inline]
     fn initialize(&mut self, client_sock: Option<(u32, u16)>, role: TcpRole) {
         self.seqn_nxt = 0;
-        self.seqn_una = 0;
+        //self.seqn_una = 0;
         self.ackn_nxt = 0;
         let s = client_sock.unwrap_or((0, 0));
         self.client_ip = s.0;
         self.client_port = s.1;
         self.wheel_slot_and_index = (0, 0);
         self.server_index = 0;
+        self.payload_packets = 0;
         self.state = tcp_start_state(role);
     }
 
@@ -69,12 +73,13 @@ impl Connection {
     fn new() -> Connection {
         Connection {
             seqn_nxt: 0, //next seqn towards DUT
-            seqn_una: 0, // acked by DUT
+            //seqn_una: 0, // acked by DUT
             ackn_nxt: 0, //next ackn towards DUT
             wheel_slot_and_index: (0, 0),
             client_port: 0,
             client_ip: 0,
             server_index: 0,
+            payload_packets: 0,
             record: None,
             state: TcpState::Listen,
         }
@@ -152,19 +157,15 @@ impl Connection {
     #[inline]
     pub fn increment_payload_packets(&mut self) -> usize {
         if self.record.is_some() {
-            self.record.as_mut().unwrap().increment_payload_packets()
-        } else {
-            0
-        }
+            self.record.as_mut().unwrap().increment_payload_packets();
+        };
+        self.payload_packets += 1;
+        self.payload_packets as usize
     }
 
     #[inline]
     pub fn payload_packets(&self) -> usize {
-        if self.record.is_some() {
-            self.record.as_ref().unwrap().payload_packets()
-        } else {
-            0
-        }
+        self.payload_packets as usize
     }
 
     #[inline]
@@ -257,7 +258,7 @@ impl ConRecordOperations<TEngineStore> for DetailedRecord {
 
 impl fmt::Display for Connection {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Connection(sock={:?}, state={:?})", self.sock(), self.state(), )
+        write!(f, "Connection(sock={:?}, state={:?})", self.sock(), self.state(),)
     }
 }
 
@@ -329,7 +330,7 @@ impl ConnectionManagerC {
         info!(
             "created ConnectionManager {} for port {}, rxq {}, ip= {}, tcp ports {} - {}",
             old_manager_count,
-            PacketRx::port_id(&cm.pci),
+            cm.pci.port_id(),
             cm.pci.rxq(),
             Ipv4Addr::from(ip),
             if tcp_port_base == 0 { 1 } else { tcp_port_base },
@@ -340,9 +341,8 @@ impl ConnectionManagerC {
 
     #[inline]
     pub fn max_concurrent_connections(&self) -> usize {
-//        (!self.pci.port.get_tcp_dst_port_mask() - (if self.tcp_port_base == 0 { 1 } else { 0 })) as usize
-        self.no_available_ports
-            - self.min_free_ports
+        //        (!self.pci.port.get_tcp_dst_port_mask() - (if self.tcp_port_base == 0 { 1 } else { 0 })) as usize
+        self.no_available_ports - self.min_free_ports
     }
 
     #[inline]
@@ -533,8 +533,12 @@ impl ConnectionManagerC {
     }
 
     #[inline]
-    pub fn set_ready_connection(&mut self, port: u16) {
+    pub fn set_ready_connection(&mut self, port: u16, ready_flag: &Arc<AtomicBool>) {
         self.ready.push_back(port);
+        // if this is the first ready connection, we restart the injector, avoid accessing Atomic unnecessarily
+        if self.ready_connections() == 1 {
+            ready_flag.store(true, Ordering::SeqCst);
+        }
     }
 
     #[inline]

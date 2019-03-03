@@ -88,6 +88,8 @@ pub struct EngineConfig {
     pub cps_limit: Option<u64>,
     pub max_open: Option<usize>,
     pub detailed_records: Option<bool>,
+    pub fin_by_client: Option<usize>,
+    pub fin_by_server: Option<usize>,
 }
 
 impl EngineConfig {
@@ -168,7 +170,7 @@ pub fn setup_pipelines(
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
-    flowdirector_map: HashMap<i32, Arc<FlowDirector>>,
+    flowdirector_map: HashMap<u16, Arc<FlowDirector>>,
     tx: Sender<MessageFrom<TEngineStore>>,
     system_data: SystemData,
 ) {
