@@ -12,10 +12,9 @@ extern crate log;
 extern crate traffic_lib;
 
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::interface::{PortType, PortQueue};
+use e2d2::interface::{PortType, PmdPort};
 use e2d2::native::zcsi::*;
-use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler};
-use e2d2::allocators::CacheAligned;
+use e2d2::scheduler::{NetBricksContext, StandaloneScheduler, initialize_system};
 
 use netfcts::initialize_flowdirector;
 use netfcts::comm::{MessageFrom, MessageTo};
@@ -36,7 +35,7 @@ use traffic_lib::ReleaseCause;
 use traffic_lib::TcpState;
 use traffic_lib::TEngineStore;
 
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap};
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,7 +141,7 @@ pub fn main() {
                 debug!("Supported filters on port {}:", port.port_id());
                 for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
                     let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
-                    debug!("{0: <30}: {1: >5}", RteFilterType::from(i), result);
+                    debug!("{:<50}: {}(rc={})", RteFilterType::from(i), if result== 0 { "supported" } else {"not supported"}, result);
                 }
             }
         }
@@ -169,12 +168,12 @@ pub fn main() {
             let mtx_clone = mtx.clone();
             let nr_connections = config_cloned.test_size.expect("please specify test_size");
 
-            context.add_pipeline_to_run(Box::new(
-                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+            context.add_pipeline_to_run_tx_buffered(Box::new(
+                move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
                     setup_pipelines(
                         core,
                         nr_connections, // no of connections to generate per pipeline
-                        p,
+                        pmd_ports,
                         s,
                         &config_cloned.engine,
                         l234data.clone(),

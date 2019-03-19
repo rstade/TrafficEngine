@@ -19,9 +19,9 @@ use std::fs::File;
 use std::vec::Vec;
 use std::process;
 
-use e2d2::config::{basic_opts, read_matches};
+use e2d2::config::{basic_opts, read_matches, NetbricksConfiguration};
 use e2d2::native::zcsi::*;
-use e2d2::interface::{PortQueue, PortType};
+use e2d2::interface::{PortQueue, PortType, PmdPort};
 use e2d2::scheduler::{initialize_system, NetBricksContext};
 use e2d2::scheduler::StandaloneScheduler;
 use e2d2::allocators::CacheAligned;
@@ -174,12 +174,12 @@ pub fn run_test(test_type: TestType) {
             let configuration_cloned = configuration.clone();
             let mtx_clone = mtx.clone();
 
-            context.add_pipeline_to_run(Box::new(
-                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
+            context.add_pipeline_to_run_tx_buffered(Box::new(
+                move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
                     setup_pipelines(
                         core,
                         configuration_cloned.test_size.unwrap(),
-                        p,
+                        pmd_ports,
                         s,
                         &configuration_cloned.engine,
                         l234data.clone(),

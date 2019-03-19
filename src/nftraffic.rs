@@ -1,4 +1,3 @@
-//use e2d2::operators::{ReceiveBatch, Batch, merge, merge_with_selector};
 use e2d2::operators::{ReceiveBatch, Batch, merge_auto, SchedulingPolicy};
 use e2d2::scheduler::{Runnable, Scheduler, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
@@ -26,7 +25,6 @@ use EngineConfig;
 use netfcts::system::SystemData;
 #[cfg(feature = "profiling")]
 use netfcts::utils::TimeAdder;
-use netfcts::is_kni_core;
 use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4};
 use netfcts::tasks::{private_etype, PacketInjector, TickGenerator, install_task};
@@ -48,7 +46,7 @@ const SEQN_SHIFT: usize = 4;
 pub fn setup_generator(
     core: i32,
     nr_connections: usize, //# of connections to setup per pipeline
-    pci: &CacheAligned<PortQueue>,
+    pci: &CacheAligned<PortQueueTxBuffered>,
     kni: &CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
@@ -58,22 +56,22 @@ pub fn setup_generator(
     system_data: SystemData,
 ) {
     let mut me = engine_config.get_l234data();
-    let l4flow_for_this_core = flowdirector_map.get(&pci.port.port_id()).unwrap().get_flow(pci.rxq());
+    let l4flow_for_this_core = flowdirector_map.get(&pci.port_queue.port_id()).unwrap().get_flow(pci.port_queue.rxq());
     me.ip = l4flow_for_this_core.ip; // in case we use destination IP address for flow steering
 
     let pipeline_id = PipelineId {
         core: core as u16,
-        port_id: pci.port.port_id() as u16,
-        rxq: pci.rxq(),
+        port_id: pci.port_queue.port_id() as u16,
+        rxq: pci.port_queue.rxq(),
     };
     debug!("enter setup_generator {}", pipeline_id);
 
     let detailed_records = engine_config.detailed_records.unwrap_or(false);
-    let mut cm_c = ConnectionManagerC::new(pipeline_id.clone(), pci.clone(), l4flow_for_this_core, detailed_records);
+    let mut cm_c = ConnectionManagerC::new(pipeline_id.clone(), pci.port_queue.clone(), l4flow_for_this_core, detailed_records);
     let mut cm_s = ConnectionManagerS::new(detailed_records);
 
     let mut timeouts = Timeouts::default_or_some(&engine_config.timeouts);
-    let max_open = engine_config.max_open.unwrap_or(cm_c.no_available_ports());
+    let max_open = engine_config.max_open.unwrap_or(cm_c.available_ports_count());
     let fin_by_client = engine_config.fin_by_client.unwrap_or(1000);
     let fin_by_server = engine_config.fin_by_server.unwrap_or(1);
 
@@ -113,14 +111,14 @@ pub fn setup_generator(
     // we send the transmitter to the remote receiver of our messages
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
-    // forwarding frames coming from KNI to PCI, if we are the kni core
-    if is_kni_core(pci) {
+    // forwarding frames coming from KNI to PCI, if we run queue 0
+    if pci.port_queue.rxq() == 0 {
         let forward2pci = ReceiveBatch::new(kni.clone()).parse::<MacHeader>().send(pci.clone());
         let uuid = Uuid::new_v4();
         let name = String::from("Kni2Pci");
         sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
     }
-    let thread_id = format!("<c{}, rx{}>: ", core, pci.rxq());
+    let thread_id = format!("<c{}, rx{}>: ", core, pci.port_queue.rxq());
     let tx_clone = tx.clone();
     let mut counter_c = TcpCounter::new();
     let mut start_stamp: u64 = 0;
@@ -244,8 +242,8 @@ pub fn setup_generator(
     // group 0 -> dump packets
     // group 1 -> send to PCI
     // group 2 -> send to KNI
-    let rxq = pci.rxq();
-    let csum_offload = pci.port.csum_offload();
+    let rxq = pci.port_queue.rxq();
+    let csum_offload = pci.port_queue.port.csum_offload();
     #[cfg(feature = "profiling")]
         let tx_stats = pci.tx_stats();
     #[cfg(feature = "profiling")]
@@ -601,9 +599,11 @@ pub fn setup_generator(
             // SYN injection
             (PRIVATE_ETYPE_PACKET, 1) => {
                 if counter_c[TcpStatistics::SentSyn] == 0 {
-                    start_stamp = utils::rdtscp_unsafe()
+                    start_stamp = utils::rdtscp_unsafe();
                 }
                 if counter_c[TcpStatistics::SentSyn] < nr_connections {
+                    //info!("syn= {}, ack= {}, open= {}", counter_c[TcpStatistics::SentSyn], counter_c[TcpStatistics::RecvSynAck], cm_c.concurrent_connections());
+                    //assert!(counter_c[TcpStatistics::SentSyn]- counter_c[TcpStatistics::RecvSynAck] <= max_open);
                     if cm_c.concurrent_connections() < max_open {
                         if let Some(c) = cm_c.create(TcpRole::Client) {
                             generate_syn(

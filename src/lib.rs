@@ -34,7 +34,7 @@ use separator::Separatable;
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
 use e2d2::allocators::CacheAligned;
-use e2d2::interface::PortQueue;
+use e2d2::interface::PortQueueTxBuffered;
 use e2d2::interface::*;
 
 use netfcts::errors::*;
@@ -42,14 +42,14 @@ use nftraffic::*;
 use netfcts::tasks::*;
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
-use netfcts::{is_kni_core, setup_kni, FlowSteeringMode};
+use netfcts::{is_kni_core, setup_kni, FlowSteeringMode, new_port_queues_for_core};
 use netfcts::io::print_hard_statistics;
 use ipnet::Ipv4Net;
 
 use std::fs::File;
 use std::io::Read;
 use std::net::Ipv4Addr;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -57,7 +57,6 @@ use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
 use std::str::FromStr;
-
 
 #[derive(Deserialize)]
 struct Config {
@@ -166,7 +165,7 @@ pub fn read_config(filename: &str) -> Result<Configuration> {
 pub fn setup_pipelines(
     core: i32,
     no_packets: usize,
-    ports: HashSet<CacheAligned<PortQueue>>,
+    pmd_ports: HashMap<String, Arc<PmdPort>>,
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
@@ -174,45 +173,20 @@ pub fn setup_pipelines(
     tx: Sender<MessageFrom<TEngineStore>>,
     system_data: SystemData,
 ) {
-    let mut kni: Option<&CacheAligned<PortQueue>> = None;
-    let mut pci: Option<&CacheAligned<PortQueue>> = None;
-    for port in &ports {
-        debug!(
-            "setup_pipeline on core {}: port {} --  {} rxq {} txq {}",
-            core,
-            port.port,
-            port.port.mac_address(),
-            port.rxq(),
-            port.txq(),
-        );
-        if port.port.is_kni() {
-            kni = Some(port);
-        } else {
-            pci = Some(port);
-        }
-    }
-
-    if pci.is_none() {
-        panic!("need at least one pci port");
-    }
-
-    // kni receive queue is served on the first core (i.e. rxq==0)
-
-    if kni.is_none() && is_kni_core(pci.unwrap()) {
-        // we need a kni i/f for queue 0
-        panic!("need one kni port for queue 0");
-    }
+    let (pci, kni) = new_port_queues_for_core(core, &pmd_ports);
+    assert_eq!(pci.port_queue.port_id(), kni.port_id());
 
     let uuid = Uuid::new_v4();
     let name = String::from("KniHandleRequest");
 
-    if is_kni_core(pci.unwrap()) {
+    // runs on first core of the associated pci port (rxq == 0)
+    if pci.port_queue.rxq() == 0 {
         sched.add_runnable(
             Runnable::from_task(
                 uuid,
                 name,
                 KniHandleRequest {
-                    kni_port: kni.unwrap().port.clone(),
+                    kni_port: kni.port.clone(),
                     last_tick: 0,
                 },
             )
@@ -223,8 +197,8 @@ pub fn setup_pipelines(
     setup_generator(
         core,
         no_packets,
-        pci.unwrap(),
-        kni.unwrap(),
+        &pci,
+        &kni,
         sched,
         engine_config,
         servers,

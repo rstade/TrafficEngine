@@ -272,11 +272,11 @@ pub struct ConnectionManagerC {
     min_free_ports: usize,
     // ports of connections with data to send and in state Established when enqueued
     port2con: Vec<Connection>,
-    pci: CacheAligned<PortQueue>,
+    pci: PortQueue,
     // the PortQueue for which connections are managed
     pipeline_id: PipelineId,
     tcp_port_base: u16,
-    no_available_ports: usize,
+    available_ports_count: usize,
     // e.g. used as a listen port, not assigned by create
     listen_port: u16,
     ip: u32,
@@ -291,7 +291,7 @@ const MAX_RECORDS: usize = 0x3FFFF as usize;
 impl ConnectionManagerC {
     pub fn new(
         pipeline_id: PipelineId,
-        pci: CacheAligned<PortQueue>,
+        pci: PortQueue,
         l4flow: &L4Flow,
         detailed_records: bool,
     ) -> ConnectionManagerC {
@@ -316,7 +316,7 @@ impl ConnectionManagerC {
                 avail_ports = vec.len();
                 VecDeque::<u16>::from(vec)
             },
-            no_available_ports: avail_ports,
+            available_ports_count: avail_ports,
             ready: VecDeque::with_capacity(MAX_CONNECTIONS), // connections which became Established (but may not longer be)
             min_free_ports: !port_mask as usize + 1,
             pci,
@@ -342,17 +342,17 @@ impl ConnectionManagerC {
     #[inline]
     pub fn max_concurrent_connections(&self) -> usize {
         //        (!self.pci.port.get_tcp_dst_port_mask() - (if self.tcp_port_base == 0 { 1 } else { 0 })) as usize
-        self.no_available_ports - self.min_free_ports
+        self.available_ports_count - self.min_free_ports
     }
 
     #[inline]
     pub fn concurrent_connections(&self) -> usize {
-        self.no_available_ports - self.free_ports.len()
+        self.available_ports_count - self.free_ports.len()
     }
 
     #[inline]
-    pub fn no_available_ports(&self) -> usize {
-        self.no_available_ports
+    pub fn available_ports_count(&self) -> usize {
+        self.available_ports_count
     }
 
 
