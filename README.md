@@ -58,8 +58,7 @@ Our test scenario is as follows:
 * We connect client- with server-side of TrafficEngine by using the loopback feature of the NIC (see [loopback_run.toml](https://github.com/rstade/TrafficEngine/blob/master/loopback_run.toml)). For this we used a 82599 based NIC.
 * After the client has setup the TCP connection, it sends a small payload packet to the server. After receiving the payload the server side release the TCP connection. In total we exchange seven packets per connection. 
 * The same TrafficEngine instance operates concurrently as client and as server. Therefore when comparing our cps figures with the cps of a TCP server our figures can be approximately doubled. 
-* Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache and a recent Centos 7.5 real-time kernel, e.g. from repository:  http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. We also performed the basic tuning steps to isolate the cores which are running our working threads. The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md).
-* Each test run sets up and releases 200,000 connections per pipeline.
+* Tests were run on a two socket server with two rather old 4 core L5520 CPU @ 2.27GHz with 32K/256K/8192K L1/L2/L3 Cache and a recent Centos 7.6 real-time kernel, e.g. from repository:  http://linuxsoft.cern.ch/cern/centos/7/rt/CentOS-RT.repo. We also performed the basic tuning steps to isolate the cores which are running our working threads. The real-time kernel increases determinism significantly versus the usual Centos non-real-time kernel. For more information see [rt-tuning.md](https://github.com/rstade/TrafficEngine/blob/master/rt-tuning.md).
 
 The following figures shows results for the achieved connections per second in dependence of the cores used for forwarding pipelines. The measurements are based on NetBricks using DPDK 18.11. The upper curve is showing the result with generation of connection records switched off. Each point is the average of four runs with 2 million TCP connections each per core. The lower curve are the results with generation of connection records. In the latter case each run has 200 thousand TCP connections per core. 
 
@@ -68,7 +67,6 @@ The following figures shows results for the achieved connections per second in d
 **_Limitations_**
 
 Currently only a basic TCP state machine without retransmission, flow control, etc., is implemented.
-
 
 
 
