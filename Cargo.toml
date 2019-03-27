@@ -13,7 +13,7 @@ path = "src/bin.rs"
 
 
 [dependencies]
-e2d2 = { version = "=0.5.2", path = "../../work/NetBricks/framework", features = ["performance"] }
+e2d2 = { version = "=1.0.0", path = "../../work/NetBricks/framework", features = ["performance"] }
 netfcts={ version="0.1.5", path = "../netfcts" }
 fnv = "*"
 log = ">=0.4"

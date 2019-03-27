@@ -11,7 +11,7 @@ use std::thread;
 use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, Shutdown, Ipv4Addr};
 use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap};
 use std::io::{Read, Write, BufWriter};
 use std::str::FromStr;
 use std::error::Error;
@@ -19,12 +19,11 @@ use std::fs::File;
 use std::vec::Vec;
 use std::process;
 
-use e2d2::config::{basic_opts, read_matches, NetbricksConfiguration};
+use e2d2::config::{basic_opts, read_matches, };
 use e2d2::native::zcsi::*;
-use e2d2::interface::{PortQueue, PortType, PmdPort};
+use e2d2::interface::{ PortType, PmdPort};
 use e2d2::scheduler::{initialize_system, NetBricksContext};
 use e2d2::scheduler::StandaloneScheduler;
-use e2d2::allocators::CacheAligned;
 use e2d2::utils;
 
 use ipnet::Ipv4Net;

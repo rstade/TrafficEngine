@@ -33,8 +33,6 @@ use separator::Separatable;
 
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
-use e2d2::allocators::CacheAligned;
-use e2d2::interface::PortQueueTxBuffered;
 use e2d2::interface::*;
 
 use netfcts::errors::*;
@@ -42,7 +40,7 @@ use nftraffic::*;
 use netfcts::tasks::*;
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
-use netfcts::{is_kni_core, setup_kni, FlowSteeringMode, new_port_queues_for_core};
+use netfcts::{setup_kni, FlowSteeringMode, new_port_queues_for_core};
 use netfcts::io::print_hard_statistics;
 use ipnet::Ipv4Net;
 

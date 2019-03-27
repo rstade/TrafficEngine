@@ -9,10 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-
-use e2d2::allocators::CacheAligned;
 use e2d2::interface::{PortQueue, L4Flow};
-
 use netfcts::timer_wheel::TimerWheel;
 use PipelineId;
 
@@ -29,7 +26,7 @@ pub struct Connection {
     /// next client side sequence no towards DUT
     pub seqn_nxt: u32,
     // oldest unacknowledged sequence no
-//    pub seqn_una: u32,
+    //    pub seqn_una: u32,
     /// current ack no towards DUT (expected seqn)
     pub ackn_nxt: u32,
     /// either our IP, if we are client, or IP of DUT if we are server
@@ -289,12 +286,7 @@ const MAX_CONNECTIONS: usize = 0xFFFF as usize;
 const MAX_RECORDS: usize = 0x3FFFF as usize;
 
 impl ConnectionManagerC {
-    pub fn new(
-        pipeline_id: PipelineId,
-        pci: PortQueue,
-        l4flow: &L4Flow,
-        detailed_records: bool,
-    ) -> ConnectionManagerC {
+    pub fn new(pipeline_id: PipelineId, pci: PortQueue, l4flow: &L4Flow, detailed_records: bool) -> ConnectionManagerC {
         let old_manager_count: u16 = GLOBAL_MANAGER_COUNT.fetch_add(1, Ordering::SeqCst) as u16;
         let (ip, tcp_port_base) = (l4flow.ip, l4flow.port);
         let port_mask = pci.port.get_tcp_dst_port_mask();

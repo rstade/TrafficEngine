@@ -141,7 +141,12 @@ pub fn main() {
                 debug!("Supported filters on port {}:", port.port_id());
                 for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
                     let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
-                    debug!("{:<50}: {}(rc={})", RteFilterType::from(i), if result== 0 { "supported" } else {"not supported"}, result);
+                    debug!(
+                        "{:<50}: {}(rc={})",
+                        RteFilterType::from(i),
+                        if result == 0 { "supported" } else { "not supported" },
+                        result
+                    );
                 }
             }
         }
