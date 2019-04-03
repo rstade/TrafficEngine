@@ -1,6 +1,6 @@
 [package]
 name = "trafficengine"
-version = "0.2.5"
+version = "0.2.6"
 authors = ["Rainer Stademann <rainer.stademann@silverengine.de>"]
 
 [lib]
@@ -13,14 +13,15 @@ path = "src/bin.rs"
 
 
 [dependencies]
-e2d2 = { version = "=1.0.0", path = "../../work/NetBricks/framework", features = ["performance"] }
+# we are using here e2de from branch e2d2-rs-v1 of https://github.com/rstade/NetBricks
+e2d2 = { version = "=1.0.1", path = "../../work/NetBricks/framework", features = ["performance"] }
 netfcts={ version="0.1.5", path = "../netfcts" }
 fnv = "*"
 log = ">=0.4"
 env_logger = ">=0.5"
 ctrlc = { version = ">=3.1", features = ["termination"] }
 time = ">=0.1.0"
-toml = ">=0.4"
+toml = "~0.4"
 separator =  ">= 0.3"
 serde = "1.0"
 serde_derive = ">=1.0"

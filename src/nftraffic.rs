@@ -1,11 +1,8 @@
 use e2d2::operators::{ReceiveBatch, Batch, merge_auto, SchedulingPolicy};
 use e2d2::scheduler::{Runnable, Scheduler, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
-use e2d2::headers::{IpHeader, MacHeader, TcpHeader};
 use e2d2::interface::*;
 use e2d2::queues::{new_mpsc_queue_pair, new_mpsc_queue_pair_with_size};
-use e2d2::headers::EndOffset;
-use e2d2::common::EmptyMetadata;
 use e2d2::utils;
 
 use std::sync::mpsc::{Sender, channel};
@@ -29,7 +26,6 @@ use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
 use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4};
 use netfcts::tasks::{private_etype, PacketInjector, TickGenerator, install_task};
 use netfcts::timer_wheel::TimerWheel;
-use netfcts::HeaderState;
 use netfcts::prepare_checksum_and_ttl;
 use netfcts::set_header;
 use netfcts::remove_tcp_options;
@@ -121,7 +117,7 @@ pub fn setup_generator(
 
     // forwarding frames coming from KNI to PCI, if we run queue 0
     if pci.port_queue.rxq() == 0 {
-        let forward2pci = ReceiveBatch::new(kni.clone()).parse::<MacHeader>().send(pci.clone());
+        let forward2pci = ReceiveBatch::new(kni.clone()).send(pci.clone());
         let uuid = Uuid::new_v4();
         let name = String::from("Kni2Pci");
         sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
@@ -238,11 +234,10 @@ pub fn setup_generator(
     let receive_pci = ReceiveBatch::new(pci.clone());
     let l2_input_stream = merge_auto(
         vec![
-            syn_consumer.compose(),
-            payload_consumer.compose(),
-            consumer_timerticks.set_urgent().compose(),
-            //l2groups.get_group(1).unwrap().compose(),
-            receive_pci.compose(),
+            box syn_consumer,
+            box payload_consumer,
+            box consumer_timerticks.set_urgent(),
+            box receive_pci,
         ],
         SchedulingPolicy::LongestQueue,
     );
@@ -553,7 +548,8 @@ pub fn setup_generator(
         // we must operate on a clone of the borrowed packet, as we want to move it.
         // we release the clone within this closure, we do not care about mbuf refcount
         let mut pdu = pdu_in.clone_without_ref_counting();
-        let header0= pdu.get_header(0).unwrap().clone();
+
+        let header0= pdu.get_header(0).clone();
         let mac_header = header0.as_mac().unwrap();
         let b_private_etype = private_etype(&mac_header.etype());
         if !b_private_etype {
@@ -566,7 +562,7 @@ pub fn setup_generator(
                 return 2;
             }
         }
-        let header1= pdu.get_header(1).unwrap().clone();
+        let header1= pdu.get_header(1).clone();
         let ip_header = header1.as_ip().unwrap();
         if !b_private_etype {
             // everything other than TCP, and everything not addressed to us we send to KNI, i.e. group 2
@@ -574,14 +570,13 @@ pub fn setup_generator(
                 return 2;
             }
         }
-        let header2= pdu.get_header(2).unwrap().clone();
+        let header2= pdu.get_header(2).clone();
         let tcp_header = header2.as_tcp().unwrap();
         let mut group_index = 0usize; // the index of the group to be returned, default 0: dump packet
         if csum_offload {
             pdu.set_tcp_ipv4_checksum_tx_offload();
         }
 
-        // converting to raw pointer avoids to borrow mutably from p
         let mut hs = HeaderState {
             ip: ip_header,
             mac: mac_header,
@@ -1060,7 +1055,7 @@ pub fn setup_generator(
     };
 
     // process TCP traffic addressed to Proxy
-    let mut l4groups = l2_input_stream.parse::<MacHeader>().group_by(
+    let mut l4groups = l2_input_stream.group_by(
         3,
         group_by_closure,
         sched,
@@ -1069,9 +1064,9 @@ pub fn setup_generator(
     );
 
     let pipe2kni = l4groups.get_group(2).unwrap().send(kni.clone());
-    let l4pciflow = l4groups.get_group(1).unwrap().compose();
-    let l4dumpflow = l4groups.get_group(0).unwrap().filter(box move |_| false).compose();
-    let pipe2pci = merge_auto(vec![l4pciflow, l4dumpflow], SchedulingPolicy::LongestQueue).send(pci.clone());
+    let l4pciflow = l4groups.get_group(1).unwrap();
+    let l4dumpflow = l4groups.get_group(0).unwrap().drop();
+    let pipe2pci = merge_auto(vec![box l4pciflow, box l4dumpflow], SchedulingPolicy::LongestQueue).send(pci.clone());
 
     let uuid_pipe2kni = install_task(sched, "Pipe2Kni", pipe2kni);
     tx.send(MessageFrom::Task(pipeline_id.clone(), uuid_pipe2kni, TaskType::Pipe2Kni))

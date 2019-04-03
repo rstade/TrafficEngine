@@ -15,11 +15,10 @@ extern crate traffic_lib;
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::interface::{PortType, PortQueue,};
-use e2d2::headers::{MacHeader, NullHeader};
 use e2d2::native::zcsi::*;
 use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler, Scheduler, Runnable};
 use e2d2::allocators::CacheAligned;
-use e2d2::operators::{ReceiveBatch, Batch, TransformBatch, ParsedBatch};
+use e2d2::operators::{ReceiveBatch, Batch, TransformBatch};
 
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::errors::*;
@@ -40,12 +39,12 @@ use uuid::Uuid;
 use std::io::Read;
 
 
-pub fn nf_macswap<T: 'static + Batch<Header = NullHeader>>(
+pub fn nf_macswap<T: 'static + Batch>(
     parent: T,
-) -> TransformBatch<MacHeader, ParsedBatch<MacHeader, T>> {
-    parent.parse::<MacHeader>().transform(box move |pkt| {
-        assert!(pkt.refcnt() == 1);
-        let hdr = pkt.get_mut_header();
+) -> TransformBatch<T> {
+    parent.transform(box move |pkt| {
+        assert_eq!(pkt.refcnt(),1);
+        let hdr = pkt.get_header(0).as_mac().unwrap();
         hdr.swap_addresses();
     })
 }
