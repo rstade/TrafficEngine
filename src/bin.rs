@@ -5,6 +5,7 @@ extern crate eui48;
 extern crate ipnet;
 extern crate separator;
 extern crate netfcts;
+extern crate bincode;
 
 // Logging
 #[macro_use]
@@ -12,9 +13,10 @@ extern crate log;
 extern crate traffic_lib;
 
 use e2d2::config::{basic_opts, read_matches};
-use e2d2::interface::{PortType, PmdPort};
+use e2d2::interface::{PortType, PmdPort, Pdu, HeaderState};
 use e2d2::native::zcsi::*;
 use e2d2::scheduler::{NetBricksContext, StandaloneScheduler, initialize_system};
+use e2d2::utils;
 
 use netfcts::initialize_flowdirector;
 use netfcts::comm::{MessageFrom, MessageTo};
@@ -26,6 +28,8 @@ use netfcts::{ConRecord, HasTcpState, HasConData};
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
 use netfcts::errors::*;
+use netfcts::tcp_common::CData;
+use netfcts::strip_payload;
 
 use traffic_lib::{read_config, setup_pipelines, Connection};
 
@@ -51,6 +55,7 @@ use std::net::{SocketAddrV4, Ipv4Addr};
 use std::mem;
 use std::cmp;
 
+use bincode::{serialize_into};
 use separator::Separatable;
 use ipnet::Ipv4Net;
 
@@ -84,6 +89,10 @@ pub fn main() {
     }
 
     let configuration = read_config(&config_file).unwrap();
+
+    // number of payloads sent, after which the connection is closed
+    let fin_by_client = configuration.engine.fin_by_client.unwrap_or(1000);
+    let _fin_by_server = configuration.engine.fin_by_server.unwrap_or(1);
 
     fn am_root() -> bool {
         match env::var("USER") {
@@ -153,6 +162,39 @@ pub fn main() {
         Ok(context)
     }
 
+    let fin_by_client_clone= fin_by_client.clone();
+    let f_set_payload = Box::new( move |p: &mut Pdu, c: &mut Connection, h: &mut HeaderState, b_fin: &mut bool| {
+        let pp = c.sent_payload_pkts();
+        if pp < 1 {
+            // this is the first payload packet sent by client, headers are already prepared with client and server addresses and ports
+            let sock=SocketAddrV4::new(Ipv4Addr::from(p.get_header(1).as_ip().unwrap().src()), p.get_header(2).as_tcp().unwrap().src_port());
+            let cdata = CData::new(&sock, c.port(), c.uid());
+            let mut buf = [0u8; 16];
+            serialize_into(&mut buf[..], &cdata).expect("cannot serialize");
+            //let buf = serialize(&cdata).unwrap();
+            let sz = buf.len();
+            let ip_sz = h.ip.length();
+            p.add_to_payload_tail(sz).expect("insufficient tail room");
+            h.ip.set_length(ip_sz + sz as u16);
+            p.copy_payload_from_u8_slice(&buf, 2); // 2 -> tcp_payload
+            return h.tcp_payload_len();
+        } else if pp == fin_by_client_clone && c.state() < TcpState::CloseWait {
+            strip_payload(p, h);
+            *b_fin= true;
+            return 0
+        } else if pp < fin_by_client_clone && c.state() < TcpState::CloseWait {
+            strip_payload(p, h);
+            let stamp=utils::rdtsc_unsafe();
+            let buf=stamp.to_be_bytes();
+            let ip_sz = h.ip.length();
+            p.add_to_payload_tail(buf.len()).expect("insufficient tail room for u64");
+            h.ip.set_length(ip_sz + buf.len() as u16);
+            p.copy_payload_from_u8_slice(&buf, 2); // 2 -> tcp_payload
+            return h.tcp_payload_len();
+        }
+        return 0
+    });
+
     match initialize_system(&mut netbricks_configuration)
         .map_err(|e| e.into())
         .and_then(|ctxt| check_system(ctxt))
@@ -185,6 +227,7 @@ pub fn main() {
                         flowdirector_map.clone(),
                         mtx_clone.clone(),
                         system_data_cloned.clone(),
+                        f_set_payload.clone(),
                     );
                 },
             ));
@@ -336,7 +379,7 @@ pub fn main() {
                             if c_server.is_some() {
                                 let c_server = c_server.unwrap();
                                 let line = format!(
-                                    "        ({:?}, {:21}, {:6}, {:3}, {:7}, {:?}, {:?}, +{}, {:?})\n",
+                                    "        ({:?}, {:21}, {:6}, {:3}, {:7}, {:7}, {:?}, {:?}, +{}, {:?})\n",
                                     c_server.role(),
                                     if c_server.sock().0 != 0 {
                                         let s = c_server.sock();
@@ -346,7 +389,8 @@ pub fn main() {
                                     },
                                     c_server.port(),
                                     c_server.server_index(),
-                                    c_server.payload_packets(),
+                                    c_server.sent_payload_packets(),
+                                    c_server.recv_payload_packets(),
                                     c_server.states(),
                                     c_server.release_cause(),
                                     (c_server.get_first_stamp().unwrap() - c.get_first_stamp().unwrap()).separated_string(),

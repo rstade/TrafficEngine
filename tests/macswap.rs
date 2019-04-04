@@ -39,11 +39,9 @@ use uuid::Uuid;
 use std::io::Read;
 
 
-pub fn nf_macswap<T: 'static + Batch>(
-    parent: T,
-) -> TransformBatch<T> {
+pub fn nf_macswap<T: 'static + Batch>(parent: T) -> TransformBatch<T> {
     parent.transform(box move |pkt| {
-        assert_eq!(pkt.refcnt(),1);
+        assert_eq!(pkt.refcnt(), 1);
         let hdr = pkt.get_header(0).as_mac().unwrap();
         hdr.swap_addresses();
     })

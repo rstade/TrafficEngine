@@ -31,7 +31,8 @@ pub struct Connection {
     pub ackn_nxt: u32,
     /// either our IP, if we are client, or IP of DUT if we are server
     client_ip: u32,
-    payload_packets: u32,
+    sent_payload_packets: u16,
+    recv_payload_packets: u16,
     /// either our port, if we are client, or port of DUT if we are server
     client_port: u16,
     server_index: u8,
@@ -51,7 +52,8 @@ impl Connection {
         self.client_port = s.1;
         self.wheel_slot_and_index = (0, 0);
         self.server_index = 0;
-        self.payload_packets = 0;
+        self.sent_payload_packets = 0;
+        self.recv_payload_packets = 0;
         self.state = tcp_start_state(role);
     }
 
@@ -76,7 +78,8 @@ impl Connection {
             client_port: 0,
             client_ip: 0,
             server_index: 0,
-            payload_packets: 0,
+            sent_payload_packets: 0,
+            recv_payload_packets: 0,
             record: None,
             state: TcpState::Listen,
         }
@@ -152,17 +155,31 @@ impl Connection {
     }
 
     #[inline]
-    pub fn increment_payload_packets(&mut self) -> usize {
+    pub fn inc_sent_payload_pkts(&mut self) -> usize {
         if self.record.is_some() {
-            self.record.as_mut().unwrap().increment_payload_packets();
+            self.record.as_mut().unwrap().inc_sent_payload_pkts();
         };
-        self.payload_packets += 1;
-        self.payload_packets as usize
+        self.sent_payload_packets += 1;
+        self.sent_payload_packets as usize
     }
 
     #[inline]
-    pub fn payload_packets(&self) -> usize {
-        self.payload_packets as usize
+    pub fn inc_recv_payload_pkts(&mut self) -> usize {
+        if self.record.is_some() {
+            self.record.as_mut().unwrap().inc_recv_payload_pkts();
+        };
+        self.recv_payload_packets += 1;
+        self.recv_payload_packets as usize
+    }
+
+    #[inline]
+    pub fn sent_payload_pkts(&self) -> usize {
+        self.sent_payload_packets as usize
+    }
+
+    #[inline]
+    pub fn recv_payload_pkts(&self) -> usize {
+        self.recv_payload_packets as usize
     }
 
     #[inline]
@@ -538,13 +555,14 @@ impl ConnectionManagerC {
         self.ready.len()
     }
 
+    #[inline]
     pub fn get_ready_connection(&mut self) -> Option<&mut Connection> {
         let mut port_result = None;
         while port_result.is_none() {
             match self.ready.pop_front() {
                 Some(port) => {
                     let c = &self.port2con[(port - self.tcp_port_base) as usize];
-                    trace!("found ready connection {}", if c.in_use() { c.port() } else { 0 });
+                    //trace!("found ready connection {}", if c.in_use() { c.port() } else { 0 });
                     if c.in_use() && c.state() == TcpState::Established {
                         port_result = Some(port)
                     }

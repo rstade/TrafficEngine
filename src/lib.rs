@@ -46,8 +46,8 @@ use ipnet::Ipv4Net;
 
 use std::fs::File;
 use std::io::Read;
-use std::net::Ipv4Addr;
-use std::collections::{HashMap};
+use std::net::{Ipv4Addr, };
+use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -55,6 +55,8 @@ use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
 use std::str::FromStr;
+
+//pub type FnPayload = Fn(&mut Pdu, &mut Connection, &SocketAddrV4, &mut bool) -> usize + Sized + Send + Sync + 'static;
 
 #[derive(Deserialize)]
 struct Config {
@@ -160,7 +162,7 @@ pub fn read_config(filename: &str) -> Result<Configuration> {
     }
 }
 
-pub fn setup_pipelines(
+pub fn setup_pipelines<FPL>(
     core: i32,
     no_packets: usize,
     pmd_ports: HashMap<String, Arc<PmdPort>>,
@@ -170,7 +172,10 @@ pub fn setup_pipelines(
     flowdirector_map: HashMap<u16, Arc<FlowDirector>>,
     tx: Sender<MessageFrom<TEngineStore>>,
     system_data: SystemData,
-) {
+    f_set_payload: Box<FPL>,
+) where
+    FPL: Fn(&mut Pdu, &mut Connection, &mut HeaderState, &mut bool) -> usize + Sized + Send + Sync + 'static,
+{
     let (pci, kni) = new_port_queues_for_core(core, &pmd_ports);
     assert_eq!(pci.port_queue.port_id(), kni.port_id());
 
@@ -203,6 +208,7 @@ pub fn setup_pipelines(
         flowdirector_map,
         tx,
         system_data,
+        f_set_payload,
     );
 }
 
@@ -337,6 +343,7 @@ pub fn spawn_recv_thread(
                     error!("error receiving from MessageFrom channel: {}", e);
                     break;
                 }
+                //m => warn!("unknown Result: {:?}", m),
             };
             match context
                 .reply_receiver
