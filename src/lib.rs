@@ -1,5 +1,6 @@
 #![feature(box_syntax)]
 #![feature(integer_atomics)]
+#![feature(trait_alias)]
 
 // Logging
 #[macro_use]
@@ -56,7 +57,7 @@ use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
 use std::str::FromStr;
 
-//pub type FnPayload = Fn(&mut Pdu, &mut Connection, &SocketAddrV4, &mut bool) -> usize + Sized + Send + Sync + 'static;
+pub trait FnPayload = Fn(&mut Pdu, &mut Connection, &mut bool) -> usize + Sized + Send + Sync + 'static;
 
 #[derive(Deserialize)]
 struct Config {
@@ -174,7 +175,7 @@ pub fn setup_pipelines<FPL>(
     system_data: SystemData,
     f_set_payload: Box<FPL>,
 ) where
-    FPL: Fn(&mut Pdu, &mut Connection, &mut HeaderState, &mut bool) -> usize + Sized + Send + Sync + 'static,
+    FPL: FnPayload,
 {
     let (pci, kni) = new_port_queues_for_core(core, &pmd_ports);
     assert_eq!(pci.port_queue.port_id(), kni.port_id());

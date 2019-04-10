@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 use std::collections::VecDeque;
 //use std::collections::HashMap;
 //use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+use std::sync::atomic::{AtomicUsize, Ordering, };
 use std::fmt;
 use std::mem;
 use std::cell::RefCell;
@@ -276,7 +276,7 @@ impl fmt::Display for Connection {
     }
 }
 
-pub static GLOBAL_MANAGER_COUNT: AtomicUsize = ATOMIC_USIZE_INIT;
+pub static GLOBAL_MANAGER_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub struct ConnectionManagerC {
     c_record_store: Option<Rc<RefCell<RecordStore<ConRecord>>>>,

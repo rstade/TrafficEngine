@@ -7,14 +7,14 @@ pool_size   = 2048              # default 2048
 cache_size  = 128               # default 32
 cores       = [ 1 ]
 ports       = [ 
-                    { name="7:00.0", rxd= 1024, txd= 4096, cores = [ 1 ], checksum = true, driver= "Ixgbe", fdir = { pballoc="RteFdirPballoc256k", mode="RteFdirModePerfect", ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFF"}, src_port_mask="0", dst_port_mask="C000"}},
+                    { name="7:00.0", rxd= 1024, txd= 4096, cores = [ 1 ], checksum = false, driver= "Ixgbe", fdir = { pballoc="RteFdirPballoc256k", mode="RteFdirModePerfect", ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFF"}, src_port_mask="0", dst_port_mask="C000"}},
                     { name="kni:1", rxd=64, txd=64, cores = [1], k_cores = [1] }
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
 [trafficengine]
 
-engine      = { flow_steering= "Port", namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24", port=999, timeouts= { established= 10000 }, cps_limit= 100000, detailed_records= true, fin_by_client= 300, fin_by_server= 1 }
+engine      = { flow_steering= "Port", namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24", port=999, timeouts= { established= 10000 }, cps_limit= 100000, detailed_records= true, fin_by_client= 3, fin_by_server= 3 }
 targets     = [ { id = "server 1", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12345 },
                 { id = "server 2", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12346 },
                 { id = "server 3", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12347 },
@@ -23,4 +23,4 @@ targets     = [ { id = "server 1", ip = "192.168.222.32", linux_if="enp7s0f1" , 
                 { id = "server 6", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12350 },
                 { id = "server 7", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12351 },
               ]
-test_size   = 128
+test_size   = 32
