@@ -40,7 +40,6 @@ use netfcts::system::get_mac_from_ifname;
 use netfcts::io::print_tcp_counters;
 #[cfg(feature = "profiling")]
 use netfcts::io::print_rx_tx_counters;
-use netfcts::errors::*;
 use netfcts::strip_payload;
 
 use read_config;
@@ -148,7 +147,7 @@ pub fn run_test(test_type: TestType) {
         })
         .collect();
 
-    fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
+    fn check_system(context: NetBricksContext) -> e2d2::common::errors::Result<NetBricksContext> {
         for port in context.ports.values() {
             if port.port_type() == &PortType::Dpdk {
                 debug!("Supported filters on port {}:", port.port_id());
@@ -515,9 +514,6 @@ pub fn run_test(test_type: TestType) {
         }
         Err(ref e) => {
             error!("Error: {}", e);
-            if let Some(backtrace) = e.backtrace() {
-                debug!("Backtrace: {:?}", backtrace);
-            }
             process::exit(1);
         }
     }

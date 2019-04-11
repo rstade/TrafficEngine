@@ -21,7 +21,6 @@ use e2d2::allocators::CacheAligned;
 use e2d2::operators::{ReceiveBatch, Batch, TransformBatch};
 
 use netfcts::comm::{MessageFrom, MessageTo};
-use netfcts::errors::*;
 use traffic_lib::{read_config,};
 use traffic_lib::spawn_recv_thread;
 use traffic_lib::TEngineStore;
@@ -131,7 +130,7 @@ pub fn macswap() {
     };
     let mut netbricks_configuration = read_matches(&matches, &opts);
 
-    fn check_system(context: NetBricksContext) -> Result<NetBricksContext> {
+    fn check_system(context: NetBricksContext) -> e2d2::common::Result<NetBricksContext> {
         for port in context.ports.values() {
             if port.port_type() == &PortType::Dpdk {
                 debug!("Supported filters on port {}:", port.port_id());
@@ -185,9 +184,6 @@ pub fn macswap() {
         }
         Err(ref e) => {
             error!("Error: {}", e);
-            if let Some(backtrace) = e.backtrace() {
-                debug!("Backtrace: {:?}", backtrace);
-            }
             std::process::exit(1);
         }
     }
