@@ -19,6 +19,7 @@ extern crate bincode;
 extern crate serde_json;
 extern crate netfcts;
 extern crate ipnet;
+extern crate core;
 
 pub mod nftraffic;
 pub mod run_test;
@@ -56,7 +57,7 @@ use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
 use std::str::FromStr;
 
-pub trait FnPayload = Fn(&mut Pdu, &mut Connection, &mut bool) -> usize + Sized + Send + Sync + 'static;
+pub trait FnPayload = Fn(&mut Pdu, &mut Connection, Option<CData>, &mut bool) -> usize + Sized + Send + Sync + 'static;
 
 #[derive(Deserialize)]
 struct Config {

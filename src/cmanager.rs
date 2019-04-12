@@ -20,6 +20,7 @@ use netfcts::utils::shuffle_ports;
 pub type TEngineStore = RecordStore<ConRecord>;
 
 //#[repr(align(64))]
+#[derive(Debug)]
 pub struct Connection {
     record: Option<Box<DetailedRecord>>,
     pub wheel_slot_and_index: (u16, u16),
@@ -252,6 +253,14 @@ impl DetailedRecord {
         self.store = None;
     }
 }
+
+
+impl fmt::Debug for DetailedRecord {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "DetailedRecord= {:?}", self.store().borrow().get(self.con_rec()))
+    }
+}
+
 
 impl ConRecordOperations<TEngineStore> for DetailedRecord {
     #[inline]

@@ -162,7 +162,7 @@ pub fn run_test(test_type: TestType) {
 
     let fin_by_client_clone = fin_by_client.clone();
     let f_set_payload = Box::new(
-        move |p: &mut Pdu, c: &mut Connection, b_fin: &mut bool| {
+        move |p: &mut Pdu, c: &mut Connection, _unused: Option<CData>, b_fin: &mut bool| {
             let pp = c.sent_payload_pkts();
             if pp < 1 {
                 // this is the first payload packet sent by client, headers are already prepared with client and server addresses and ports
@@ -170,7 +170,7 @@ pub fn run_test(test_type: TestType) {
                     Ipv4Addr::from(p.headers().ip(1).src()),
                     p.headers().tcp(2).src_port(),
                 );
-                let cdata = CData::new(&sock, c.port(), c.uid());
+                let cdata = CData::new(sock, c.port(), c.uid());
                 let mut buf = [0u8; 16];
                 serialize_into(&mut buf[..], &cdata).expect("cannot serialize");
                 //let buf = serialize(&cdata).unwrap();
@@ -317,7 +317,7 @@ pub fn run_test(test_type: TestType) {
                             stream.set_write_timeout(Some(timeout)).unwrap();
                             stream.set_read_timeout(Some(timeout)).unwrap();
                             let cdata = CData::new(
-                                &SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080),
+                                SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080),
                                 0xFFFF,
                                 utils::rdtsc_unsafe(),
                             );

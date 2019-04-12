@@ -163,18 +163,15 @@ pub fn main() {
 
     let fin_by_client_clone = fin_by_client.clone();
     let f_set_payload = Box::new(
-        move |p: &mut Pdu, c: &mut Connection, b_fin: &mut bool| {
+        move |p: &mut Pdu, c: &mut Connection, cdata: Option<CData>, b_fin: &mut bool| {
             let pp = c.sent_payload_pkts();
             if pp < 1 {
                 // this is the first payload packet sent by client, headers are already prepared with client and server addresses and ports
-                let src_port = p.headers().tcp(2).src_port();
                 let sz;
                 let mut buf = [0u8; 16];
                 {
                     let ip=p.headers_mut().ip_mut(1);
-                    let sock = SocketAddrV4::new(Ipv4Addr::from(ip.src()), src_port);
-                    let cdata = CData::new(&sock, c.port(), c.uid());
-                    serialize_into(&mut buf[..], &cdata).expect("cannot serialize");
+                    serialize_into(&mut buf[..], &cdata.unwrap()).expect("cannot serialize");
                     //let buf = serialize(&cdata).unwrap();
                     sz = buf.len();
                     let ip_sz = ip.length();
@@ -343,7 +340,7 @@ pub fn main() {
                     }
 
                     let per_connection = (max_t - min_t) / nr_connections as u64 / start_stop_stamps.len() as u64;
-                    let per_packet = (max_t - min_t) / (stats.ipackets + stats.opackets) / start_stop_stamps.len() as u64;
+                    let per_packet = (max_t - min_t) / (stats.ipackets + stats.opackets);
                     println!(
                         "cyles over all pipes = {}, per connection = {}, cps = {}, pps= {}",
                         (max_t - min_t).separated_string(),

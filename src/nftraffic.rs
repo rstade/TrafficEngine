@@ -9,9 +9,9 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
 use uuid::Uuid;
-//use serde_json;
 use bincode::{ deserialize};
 use separator::Separatable;
 
@@ -31,6 +31,7 @@ use netfcts::remove_tcp_options;
 use netfcts::{make_reply_packet, strip_payload};
 
 use {TEngineStore, FnPayload };
+
 
 const MIN_FRAME_SIZE: usize = 60;
 
@@ -408,38 +409,7 @@ pub fn setup_generator<FPL>(
             }
             prepare_checksum_and_ttl(p)
         }
-        /*
-            #[inline]
-            fn make_payload_packet(
-                p: &mut Pdu,
-                c: &mut Connection,
-                h: &mut HeaderState,
-                me: &L234Data,
-                servers: &Vec<L234Data>,
-                payload: &[u8],
-            ) {
-                h.mac.set_etype(0x0800); // overwrite private ethertype tag
-                set_header(&servers[c.server_index()], c.port(), h, &me.mac, me.ip);
-                let sz = payload.len();
-                let ip_sz = h.ip.length();
-                p.add_to_payload_tail(sz).expect("insufficient tail room");
-                h.ip.set_length(ip_sz + sz as u16);
-                h.tcp.set_seq_num(c.seqn_nxt);
-                h.tcp.unset_syn_flag();
-                h.tcp.set_window_size(5840); // 4* MSS(1460)
-                h.tcp.set_ack_num(c.ackn_nxt);
-                h.tcp.set_ack_flag();
-                h.tcp.set_psh_flag();
-                c.seqn_nxt = c.seqn_nxt.wrapping_add(sz as u32);
-                p.copy_payload_from_u8_slice(payload, 2); // 2 -> tcp_payload
-                if p.data_len() < MIN_FRAME_SIZE {
-                    let n_padding_bytes = MIN_FRAME_SIZE - p.data_len();
-                    debug!("padding with {} 0x0 bytes", n_padding_bytes);
-                    p.increase_payload_size(n_padding_bytes);
-                }
-                prepare_checksum_and_ttl(p, h);
-            }
-        */
+
         #[inline]
         fn prepare_payload_packet(c: &mut Connection, p: &mut Pdu, me: &L234Data, servers: &Vec<L234Data>) {
             p.headers_mut().mac_mut(0).set_etype(0x0800); // overwrite private ethertype tag
@@ -562,7 +532,7 @@ pub fn setup_generator<FPL>(
         let c_recv_payload = |p: &mut Pdu, c: &mut Connection| {
             debug!("in c_recv_payload");
             let mut b_fin = false;
-            f_set_payload(p, c, &mut b_fin);
+            f_set_payload(p, c, None, &mut b_fin);
             if !b_fin {
                 c.inc_sent_payload_pkts();
                 p.headers_mut().tcp_mut(2).set_seq_num(c.seqn_nxt);
@@ -664,13 +634,15 @@ pub fn setup_generator<FPL>(
             }
             // payload injection
             (PRIVATE_ETYPE_PACKET, 2) => {
-                //let mut cdata = CData::new(SocketAddrV4::new(Ipv4Addr::from(cm_c.ip()), cm_c.listen_port()), 0, 0);
+                let mut cdata = CData::new(SocketAddrV4::new(Ipv4Addr::from(cm_c.ip()), cm_c.listen_port()), 0, 0);
                 //trace!("{} payload injection packet received", thread_id);
                 //let mut ready_connection = None;
                 if let Some(c) = cm_c.get_ready_connection() {
                     prepare_payload_packet(c, pdu, &me, &servers);
                     let mut b_fin = false;
-                    f_set_payload(pdu, c, &mut b_fin);
+                    cdata.client_port = c.port();
+                    cdata.uuid = c.uid();
+                    f_set_payload(pdu, c, Some(cdata), &mut b_fin);
                     /*
                     let pp = c.sent_payload_pkts();
                     if pp < 1 {
