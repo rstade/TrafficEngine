@@ -35,19 +35,18 @@ use separator::Separatable;
 
 use e2d2::common::ErrorKind as E2d2ErrorKind;
 use e2d2::scheduler::*;
-use e2d2::interface::*;
+use e2d2::interface::{FlowDirector, PmdPort, Pdu, };
 
 use nftraffic::*;
 use netfcts::tasks::*;
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::system::SystemData;
-use netfcts::{setup_kni, FlowSteeringMode, new_port_queues_for_core};
+use netfcts::{setup_kernel_interfaces, new_port_queues_for_core, physical_ports_for_core};
 use netfcts::io::print_hard_statistics;
-use ipnet::Ipv4Net;
 
 use std::fs::File;
 use std::io::Read;
-use std::net::{Ipv4Addr, };
+use std::net::Ipv4Addr;
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::sync::mpsc::Receiver;
@@ -55,9 +54,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::sync::mpsc::RecvTimeoutError;
-use std::str::FromStr;
 
-pub trait FnPayload = Fn(&mut Pdu, &mut Connection, Option<CData>, &mut bool) -> usize + Sized + Send + Sync + 'static;
+pub trait FnPayload =
+    Fn(&mut Pdu, &mut Connection, Option<CData>, &mut bool) -> usize + Sized + Send + Sync + Clone + 'static;
 
 #[derive(Deserialize)]
 struct Config {
@@ -71,18 +70,9 @@ pub struct Configuration {
     pub test_size: Option<usize>,
 }
 
-impl Configuration {
-    pub fn flow_steering_mode(&self) -> FlowSteeringMode {
-        self.engine.flow_steering.unwrap_or(FlowSteeringMode::Port)
-    }
-}
 
 #[derive(Deserialize, Clone)]
 pub struct EngineConfig {
-    pub flow_steering: Option<FlowSteeringMode>,
-    pub namespace: String,
-    pub mac: String,
-    pub ipnet: String,
     pub timeouts: Option<Timeouts>,
     pub port: u16,
     pub cps_limit: Option<u64>,
@@ -93,16 +83,6 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
-    pub fn get_l234data(&self) -> L234Data {
-        L234Data {
-            mac: MacAddress::parse_str(&self.mac).unwrap(),
-            ip: u32::from(self.ipnet.parse::<Ipv4Net>().unwrap().addr()),
-            port: self.port,
-            server_id: "Engine".to_string(),
-            index: 0,
-        }
-    }
-
     pub fn cps_limit(&self) -> u64 {
         self.cps_limit.unwrap_or(10000000)
     }
@@ -144,8 +124,10 @@ impl Timeouts {
 pub fn read_config(filename: &str) -> e2d2::common::errors::Result<Configuration> {
     let mut toml_str = String::new();
     if File::open(filename)
-        .and_then(|mut f| f.read_to_string(&mut toml_str)).is_err() {
-        return Err(E2d2ErrorKind::ConfigurationError(format!("Could not read file {}", filename)))
+        .and_then(|mut f| f.read_to_string(&mut toml_str))
+        .is_err()
+    {
+        return Err(E2d2ErrorKind::ConfigurationError(format!("Could not read file {}", filename)));
     }
 
     info!("toml configuration:\n {}", toml_str);
@@ -155,6 +137,9 @@ pub fn read_config(filename: &str) -> e2d2::common::errors::Result<Configuration
         Err(err) => return Err(err.into()),
     };
 
+    Ok(config.trafficengine)
+
+    /*
     match config.trafficengine.engine.ipnet.parse::<Ipv4Net>() {
         Ok(_) => match config.trafficengine.engine.mac.parse::<MacAddress>() {
             Ok(_) => Ok(config.trafficengine),
@@ -162,6 +147,7 @@ pub fn read_config(filename: &str) -> e2d2::common::errors::Result<Configuration
         },
         Err(e) => Err(e.into()),
     }
+    */
 }
 
 pub fn setup_pipelines<FPL>(
@@ -178,47 +164,75 @@ pub fn setup_pipelines<FPL>(
 ) where
     FPL: FnPayload,
 {
-    let (pci, kni) = new_port_queues_for_core(core, &pmd_ports);
-    assert_eq!(pci.port_queue.port_id(), kni.port_id());
+    for pmd_port in physical_ports_for_core(core, &pmd_ports) {
+        debug!("setup_pipelines for {} on core {}:", pmd_port.name(), core);
+        let mut kni_port = None;
+        if pmd_port.kni_name().is_some() {
+            kni_port = pmd_ports.get(pmd_port.kni_name().unwrap());
+        }
+        let (pci, kni) = new_port_queues_for_core(core, &pmd_port, kni_port);
+        if pci.is_some() {
+            debug!(
+                "pmd_port= {}, rxq= {}",
+                pci.as_ref().unwrap().port_queue.port,
+                pci.as_ref().unwrap().port_queue.rxq()
+            );
+        } else {
+            debug!("pmd_port= None");
+        }
 
-    let uuid = Uuid::new_v4();
-    let name = String::from("KniHandleRequest");
+        if kni.is_some() {
+            debug!(
+                "associated kni= {}, rxq= {}",
+                kni.as_ref().unwrap().port,
+                kni.as_ref().unwrap().rxq()
+            );
+        } else {
+            debug!("associated kni= None");
+        }
 
-    // runs on first core of the associated pci port (rxq == 0)
-    if pci.port_queue.rxq() == 0 {
-        sched.add_runnable(
-            Runnable::from_task(
-                uuid,
-                name,
-                KniHandleRequest {
-                    kni_port: kni.port.clone(),
-                    last_tick: 0,
-                },
-            )
-            .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
-        );
+        let uuid = Uuid::new_v4();
+        let name = String::from("KniHandleRequest");
+
+        // Kni request handler runs on first core of the associated pci port (rxq == 0)
+        if pci.is_some()
+            && kni.is_some()
+            && kni.as_ref().unwrap().port.is_native_kni()
+            && pci.as_ref().unwrap().port_queue.rxq() == 0
+        {
+            sched.add_runnable(
+                Runnable::from_task(
+                    uuid,
+                    name,
+                    KniHandleRequest {
+                        kni_port: kni.as_ref().unwrap().port.clone(),
+                        last_tick: 0,
+                    },
+                )
+                .move_ready(), // this task must be ready from the beginning to enable managing the KNI i/f
+            );
+        }
+
+        if pci.is_some() && kni.is_some() {
+            setup_generator(
+                core,
+                no_packets,
+                pci.unwrap(),
+                kni.unwrap(),
+                sched,
+                engine_config,
+                servers.clone(),
+                &flowdirector_map,
+                &tx,
+                system_data.clone(),
+                f_set_payload.clone(),
+            );
+        }
     }
-
-    setup_generator(
-        core,
-        no_packets,
-        &pci,
-        &kni,
-        sched,
-        engine_config,
-        servers,
-        flowdirector_map,
-        tx,
-        system_data,
-        f_set_payload,
-    );
 }
 
-pub fn spawn_recv_thread(
-    mrx: Receiver<MessageFrom<TEngineStore>>,
-    mut context: NetBricksContext,
-    configuration: Configuration,
-) {
+
+pub fn spawn_recv_thread(mrx: Receiver<MessageFrom<TEngineStore>>, mut context: NetBricksContext) {
     /*
         mrx: receiver for messages from all the pipelines running
     */
@@ -233,29 +247,7 @@ pub fn spawn_recv_thread(
         // start execution of pipelines
         context.execute_schedulers();
 
-        // set up kni: this requires the executable KniHandleRequest to run (serving rte_kni_handle_request)
-        debug!("Number of PMD ports: {}", PmdPort::num_pmd_ports());
-        for port in context.ports.values() {
-            debug!(
-                "port {}:{} -- mac_address= {}",
-                port.port_type(),
-                port.port_id(),
-                port.mac_address()
-            );
-            if port.is_kni() {
-                setup_kni(
-                    port.linux_if().unwrap(),
-                    &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
-                    &configuration.engine.mac,
-                    &configuration.engine.namespace,
-                    if configuration.flow_steering_mode() == FlowSteeringMode::Ip {
-                        context.active_cores.len() + 1
-                    } else {
-                        1
-                    },
-                );
-            }
-        }
+        setup_kernel_interfaces(&context);
 
         // communicate with schedulers:
 

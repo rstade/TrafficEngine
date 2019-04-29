@@ -13,7 +13,6 @@ use std::sync::mpsc::channel;
 use std::sync::mpsc::RecvTimeoutError;
 use std::collections::HashMap;
 use std::io::{Read, Write, BufWriter};
-use std::str::FromStr;
 use std::error::Error;
 use std::fs::File;
 use std::vec::Vec;
@@ -24,16 +23,15 @@ use bincode::{serialize_into};
 
 use e2d2::config::{basic_opts, read_matches};
 use e2d2::native::zcsi::*;
-use e2d2::interface::{PortType, PmdPort, Pdu};
+use e2d2::interface::{PortType, PmdPort, Pdu, FlowSteeringMode};
 use e2d2::scheduler::{initialize_system, NetBricksContext};
 use e2d2::scheduler::StandaloneScheduler;
 use e2d2::utils;
 
-use ipnet::Ipv4Net;
 use env_logger;
 //use serde_json;
 use separator::Separatable;
-use netfcts::{initialize_flowdirector, FlowSteeringMode};
+use netfcts::{setup_flowdirector_map };
 use netfcts::comm::PipelineId;
 use netfcts::HasTcpState;
 use netfcts::system::get_mac_from_ifname;
@@ -148,9 +146,13 @@ pub fn run_test(test_type: TestType) {
         .collect();
 
     fn check_system(context: NetBricksContext) -> e2d2::common::errors::Result<NetBricksContext> {
+        let num_pmd_ports = PmdPort::num_pmd_ports();
+        for i in 0..num_pmd_ports {
+            PmdPort::print_eth_dev_info(i as u16);
+        }
         for port in context.ports.values() {
-            if port.port_type() == &PortType::Dpdk {
-                debug!("Supported filters on port {}:", port.port_id());
+            if port.port_type() == &PortType::Physical {
+                debug!("Supported filters on port {}, id={}:", port.name(), port.port_id());
                 for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
                     let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
                     debug!("{0: <30}: {1: >5}", RteFilterType::from(i), result);
@@ -166,10 +168,7 @@ pub fn run_test(test_type: TestType) {
             let pp = c.sent_payload_pkts();
             if pp < 1 {
                 // this is the first payload packet sent by client, headers are already prepared with client and server addresses and ports
-                let sock = SocketAddrV4::new(
-                    Ipv4Addr::from(p.headers().ip(1).src()),
-                    p.headers().tcp(2).src_port(),
-                );
+                let sock = SocketAddrV4::new(Ipv4Addr::from(p.headers().ip(1).src()), p.headers().tcp(2).src_port());
                 let cdata = CData::new(sock, c.port(), c.uid());
                 let mut buf = [0u8; 16];
                 serialize_into(&mut buf[..], &cdata).expect("cannot serialize");
@@ -203,14 +202,8 @@ pub fn run_test(test_type: TestType) {
         .and_then(|ctxt| check_system(ctxt))
     {
         Ok(mut context) => {
-            let flowdirector_map = initialize_flowdirector(
-                &context,
-                configuration.flow_steering_mode(),
-                &Ipv4Net::from_str(&configuration.engine.ipnet).unwrap(),
-            );
-            unsafe {
-                fdir_get_infos(1u16);
-            }
+            let flowdirector_map = setup_flowdirector_map(&context);
+
             context.start_schedulers();
 
             let (mtx, mrx) = channel::<MessageFrom<TEngineStore>>();
@@ -219,7 +212,7 @@ pub fn run_test(test_type: TestType) {
             let configuration_cloned = configuration.clone();
             let mtx_clone = mtx.clone();
 
-            context.add_pipeline_to_run_tx_buffered(Box::new(
+            context.install_pipeline_on_cores(Box::new(
                 move |core: i32, pmd_ports: HashMap<String, Arc<PmdPort>>, s: &mut StandaloneScheduler| {
                     setup_pipelines(
                         core,
@@ -236,15 +229,34 @@ pub fn run_test(test_type: TestType) {
                 },
             ));
 
+            let mut pci = None;
+            let mut kni = None;
+
+            for port in context
+                .ports
+                .values()
+                .filter(|p| p.is_physical() && p.flow_steering_mode().is_some())
+            {
+                // note down pci and kni ifaces
+                if pci.is_some() {
+                    error!("the test may not work with more than one physical dpdk port");
+                } else {
+                    pci = Some(port.clone());
+                    kni = Some(context.ports.get(port.kni_name().unwrap()).unwrap().clone());
+                    assert!(kni.is_some());
+                }
+            }
+
+
             // this is quick and dirty and just for testing purposes:
             let port_mask = u16::from_be(netbricks_configuration.ports[0].fdir_conf.unwrap().mask.dst_port_mask);
-            let rx_queues = context.rx_queues.len() as u16;
-            let rfs_mode = configuration.flow_steering_mode();
+            let rx_queues = pci.as_ref().unwrap().rx_cores.as_ref().unwrap().len() as u16;
+            let rfs_mode = pci.as_ref().unwrap().flow_steering_mode().unwrap_or(FlowSteeringMode::Port);
             let cores = context.active_cores.clone();
             debug!("rx_queues = { }, port mask = 0x{:x}", rx_queues, port_mask);
 
             // start the controller
-            spawn_recv_thread(mrx, context, configuration.clone());
+            spawn_recv_thread(mrx, context);
 
             // give threads some time to do initialization work
             thread::sleep(Duration::from_millis(1000 as u64));
@@ -296,17 +308,14 @@ pub fn run_test(test_type: TestType) {
             if test_type == TestType::Server {
                 let timeout = Duration::from_millis(1000 as u64);
                 for ntry in 0..configuration.test_size.unwrap() as u16 {
-                    let mut target_socket;
+                    let target_socket;
                     if rfs_mode == FlowSteeringMode::Port {
                         let target_port = 0xFFFF - (!port_mask + 1) * (ntry % rx_queues);
-                        target_socket =
-                            SocketAddr::from((configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr(), target_port));
+                        target_socket = SocketAddr::from((kni.as_ref().unwrap().ip_addr().unwrap(), target_port));
                         debug!("try {}: connecting to port 0x{:x}", ntry, target_port);
                     } else {
                         let target_ip = Ipv4Addr::from(
-                            u32::from(configuration.engine.ipnet.parse::<Ipv4Net>().unwrap().addr())
-                                + (ntry % rx_queues) as u32
-                                + 1,
+                            u32::from(kni.as_ref().unwrap().ip_addr().unwrap()) + (ntry % rx_queues) as u32 + 1,
                         );
                         target_socket = SocketAddr::from((target_ip, 0xFFFF));
                     }
@@ -392,7 +401,7 @@ pub fn run_test(test_type: TestType) {
             }
 
             if configuration.engine.detailed_records.unwrap_or(false) {
-                let mut file = match File::create("c_records.txt") {
+                let file = match File::create("c_records.txt") {
                     Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
                     Ok(file) => file,
                 };

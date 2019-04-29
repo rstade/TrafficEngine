@@ -31,6 +31,7 @@ use netfcts::remove_tcp_options;
 use netfcts::{make_reply_packet, strip_payload};
 
 use {TEngineStore, FnPayload };
+use std::convert::TryFrom;
 
 
 const MIN_FRAME_SIZE: usize = 60;
@@ -43,24 +44,25 @@ const SEQN_SHIFT: usize = 4;
 pub fn setup_generator<FPL>(
     core: i32,
     nr_connections: usize, //# of connections to setup per pipeline
-    pci: &CacheAligned<PortQueueTxBuffered>,
-    kni: &CacheAligned<PortQueue>,
+    pci: CacheAligned<PortQueueTxBuffered>,
+    kni: CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
     engine_config: &EngineConfig,
     servers: Vec<L234Data>,
-    flowdirector_map: HashMap<u16, Arc<FlowDirector>>,
-    tx: Sender<MessageFrom<TEngineStore>>,
+    flowdirector_map: &HashMap<u16, Arc<FlowDirector>>,
+    tx: &Sender<MessageFrom<TEngineStore>>,
     system_data: SystemData,
     f_set_payload: Box<FPL>,
 ) where
     FPL: FnPayload,
 {
-    let mut me = engine_config.get_l234data();
+    let mut me: L234Data = TryFrom::try_from(kni.port.net_spec().as_ref().unwrap().clone()).unwrap();
     let l4flow_for_this_core = flowdirector_map
         .get(&pci.port_queue.port_id())
         .unwrap()
         .get_flow(pci.port_queue.rxq());
     me.ip = l4flow_for_this_core.ip; // in case we use destination IP address for flow steering
+    me.port = engine_config.port;
 
     let pipeline_id = PipelineId {
         core: core as u16,
@@ -120,12 +122,11 @@ pub fn setup_generator<FPL>(
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
     // forwarding frames coming from KNI to PCI, if we run queue 0
-    if pci.port_queue.rxq() == 0 {
-        let forward2pci = ReceiveBatch::new(kni.clone()).send(pci.clone());
-        let uuid = Uuid::new_v4();
-        let name = String::from("Kni2Pci");
-        sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
-    }
+    let forward2pci = ReceiveBatch::new(kni.clone()).send(pci.clone());
+    let uuid = Uuid::new_v4();
+    let name = String::from("Kni2Pci");
+    sched.add_runnable(Runnable::from_task(uuid, name, forward2pci).move_ready());
+
     let thread_id = format!("<c{}, rx{}>: ", core, pci.port_queue.rxq());
     let tx_clone = tx.clone();
     let mut counter_c = TcpCounter::new();
@@ -309,14 +310,14 @@ pub fn setup_generator<FPL>(
         #[inline]
         fn syn_received(p: &mut Pdu, c: &mut Connection) {
             c.push_state(TcpState::SynReceived);
-            let client_ip=p.headers().ip(1).src();
+            let client_ip = p.headers().ip(1).src();
             // debug!("checksum in = {:X}",p.get_header().checksum());
             remove_tcp_options(p);
             make_reply_packet(p, 1);
             //generate seq number:
             c.seqn_nxt = (utils::rdtsc_unsafe() << 8) as u32;
             {
-                let tcp= p.headers_mut().tcp_mut(2);
+                let tcp = p.headers_mut().tcp_mut(2);
                 tcp.set_seq_num(c.seqn_nxt);
                 c.ackn_nxt = tcp.ack_num();
                 c.set_sock((client_ip, tcp.dst_port()));
@@ -330,7 +331,7 @@ pub fn setup_generator<FPL>(
         fn synack_received(p: &mut Pdu, c: &mut Connection) {
             make_reply_packet(p, 1);
             {
-                let tcp=p.headers_mut().tcp_mut(2);
+                let tcp = p.headers_mut().tcp_mut(2);
                 c.ackn_nxt = tcp.ack_num();
                 tcp.unset_syn_flag();
                 tcp.set_seq_num(c.seqn_nxt);
@@ -351,10 +352,8 @@ pub fn setup_generator<FPL>(
                     tcp.set_fin_flag();
                 }
             }
-            let payload_sz= tcp_payload_size(p);
-            c.seqn_nxt = c
-                .seqn_nxt
-                .wrapping_add(payload_sz as u32 + if b_fin { 1 } else { 0 });
+            let payload_sz = tcp_payload_size(p);
+            c.seqn_nxt = c.seqn_nxt.wrapping_add(payload_sz as u32 + if b_fin { 1 } else { 0 });
             //if b_fin && h.tcp_payload_len()==0 { c.seqn_nxt = c.seqn_nxt.wrapping_add(1); }
             prepare_checksum_and_ttl(p);
         }
@@ -414,7 +413,7 @@ pub fn setup_generator<FPL>(
         fn prepare_payload_packet(c: &mut Connection, p: &mut Pdu, me: &L234Data, servers: &Vec<L234Data>) {
             p.headers_mut().mac_mut(0).set_etype(0x0800); // overwrite private ethertype tag
             set_header(&servers[c.server_index()], c.port(), p, &me.mac, me.ip);
-            let tcp=p.headers_mut().tcp_mut(2);
+            let tcp = p.headers_mut().tcp_mut(2);
             tcp.set_seq_num(c.seqn_nxt);
             tcp.unset_syn_flag();
             tcp.set_window_size(5840); // 4* MSS(1460)
@@ -424,12 +423,7 @@ pub fn setup_generator<FPL>(
         }
 
         #[inline]
-        fn passive_close(
-            p: &mut Pdu,
-            c: &mut Connection,
-            thread_id: &String,
-            counter: &mut TcpCounter,
-        ) {
+        fn passive_close(p: &mut Pdu, c: &mut Connection, thread_id: &String, counter: &mut TcpCounter) {
             debug!(
                 "{} passive close on src/dst-port {}/{} in state {:?}",
                 thread_id,
@@ -455,12 +449,7 @@ pub fn setup_generator<FPL>(
         };
 
         #[inline]
-        fn active_close(
-            p: &mut Pdu,
-            c: &mut Connection,
-            counter: &mut TcpCounter,
-            state: &TcpState,
-        ) -> bool {
+        fn active_close(p: &mut Pdu, c: &mut Connection, counter: &mut TcpCounter, state: &TcpState) -> bool {
             let mut tcp_closed = false;
             {
                 let tcp = p.headers_mut().tcp_mut(2);
@@ -530,13 +519,12 @@ pub fn setup_generator<FPL>(
         let timestamp_entry = utils::rdtsc_unsafe();
 
         let c_recv_payload = |p: &mut Pdu, c: &mut Connection| {
-            debug!("in c_recv_payload");
             let mut b_fin = false;
             f_set_payload(p, c, None, &mut b_fin);
             if !b_fin {
                 c.inc_sent_payload_pkts();
                 p.headers_mut().tcp_mut(2).set_seq_num(c.seqn_nxt);
-                let payload_sz= tcp_payload_size(p);
+                let payload_sz = tcp_payload_size(p);
                 c.seqn_nxt = c.seqn_nxt.wrapping_add(payload_sz as u32);
                 make_reply_packet(p, 0);
                 p.headers_mut().tcp_mut(2).set_ack_num(c.ackn_nxt);
@@ -586,7 +574,8 @@ pub fn setup_generator<FPL>(
         let dst_sock = (pdu.headers().ip(1).dst(), pdu.headers().tcp(2).dst_port());
 
         //check ports
-        if !b_private_etype && pdu.headers().tcp(2).dst_port() != me.port && pdu.headers().tcp(2).dst_port() < tcp_port_base {
+        if !b_private_etype && pdu.headers().tcp(2).dst_port() != me.port && pdu.headers().tcp(2).dst_port() < tcp_port_base
+        {
             return 2;
         }
 
@@ -772,7 +761,7 @@ pub fn setup_generator<FPL>(
                 //
                 // **** server side ****
                 //
-                let mut opt_c = if pdu.headers().tcp(2).syn_flag() {
+                let opt_c = if pdu.headers().tcp(2).syn_flag() {
                     debug!(
                         "{} server: got SYN with src = {:?} on server listen port 0x{:x}",
                         thread_id, src_sock, server_listen_port
@@ -789,7 +778,8 @@ pub fn setup_generator<FPL>(
                 match opt_c {
                     None => warn!(
                         "no state for this packet on server port: src_sock= {:?}, tcp = {:?} ",
-                        src_sock, pdu.headers().tcp(2)
+                        src_sock,
+                        pdu.headers().tcp(2)
                     ),
                     Some(mut c) => {
                         let old_s_state = c.state().clone();
@@ -799,17 +789,23 @@ pub fn setup_generator<FPL>(
                             if diff > 0 {
                                 warn!(
                                     "{} server: unexpected seqn (packet loss?) in state {:?}, seqn differs by {}\ntcp = {}",
-                                    thread_id, old_s_state, diff, pdu.headers().tcp(2)
+                                    thread_id,
+                                    old_s_state,
+                                    diff,
+                                    pdu.headers().tcp(2)
                                 );
                             } else {
                                 debug!(
                                     "{} server: state= {:?}, diff= {}, tcp= {}",
-                                    thread_id, old_s_state, diff, pdu.headers().tcp(2)
+                                    thread_id,
+                                    old_s_state,
+                                    diff,
+                                    pdu.headers().tcp(2)
                                 );
                             }
                         } else {
                             // process payload
-                            let payload_sz= tcp_payload_size(pdu);
+                            let payload_sz = tcp_payload_size(pdu);
                             let b_payload = old_s_state >= TcpState::Established && payload_sz > 0;
                             if b_payload {
                                 counter_s[TcpStatistics::RecvPayload] += 1;
@@ -933,7 +929,7 @@ pub fn setup_generator<FPL>(
                 if !cm_c.owns_tcp_port(client_port) {
                     error!("flow steering failed {}", pdu.headers().tcp(2));
                 }
-                let mut c = cm_c.get_mut_by_port(client_port);
+                let c = cm_c.get_mut_by_port(client_port);
                 #[cfg(feature = "profiling")]
                 time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
                 match c {
@@ -964,11 +960,17 @@ pub fn setup_generator<FPL>(
                                     thread_id, old_c_state, diff, pdu.headers().tcp(2)
                                 );
                             } else {
-                                debug!("{} state= {:?}, diff= {}, tcp= {}", thread_id, old_c_state, diff, pdu.headers().tcp(2));
+                                debug!(
+                                    "{} state= {:?}, diff= {}, tcp= {}",
+                                    thread_id,
+                                    old_c_state,
+                                    diff,
+                                    pdu.headers().tcp(2)
+                                );
                             }
                         } else {
                             //check for payload
-                            let payload_sz= tcp_payload_size(pdu);
+                            let payload_sz = tcp_payload_size(pdu);
                             let b_payload = old_c_state >= TcpState::Established && payload_sz > 0;
                             if b_payload {
                                 counter_c[TcpStatistics::RecvPayload] += 1;

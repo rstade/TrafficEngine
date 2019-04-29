@@ -21,7 +21,7 @@ use e2d2::allocators::CacheAligned;
 use e2d2::operators::{ReceiveBatch, Batch, TransformBatch};
 
 use netfcts::comm::{MessageFrom, MessageTo};
-use traffic_lib::{read_config,};
+//use traffic_lib::{read_config,};
 use traffic_lib::spawn_recv_thread;
 use traffic_lib::TEngineStore;
 
@@ -52,14 +52,14 @@ where
     S: Scheduler + Sized,
 {
     for port in &ports {
-        if !port.port.is_kni() {
+        if port.port.is_physical() {
             println!("Receiving port {}", port);
         }
     }
 
     let pipelines: Vec<_> = ports
         .iter()
-        .filter(|p| !p.port.is_kni())
+        .filter(|p| p.port.is_physical())
         .map(|port| nf_macswap(ReceiveBatch::new(port.clone())).send(port.clone()))
         .collect();
     println!("Running {} pipelines", pipelines.len());
@@ -93,7 +93,7 @@ pub fn macswap() {
         info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
     }
 
-    let configuration = read_config(&toml_file.trim()).unwrap();
+    //let configuration = read_config(&toml_file.trim()).unwrap();
 
     fn am_root() -> bool {
         match env::var("USER") {
@@ -132,7 +132,7 @@ pub fn macswap() {
 
     fn check_system(context: NetBricksContext) -> e2d2::common::Result<NetBricksContext> {
         for port in context.ports.values() {
-            if port.port_type() == &PortType::Dpdk {
+            if port.port_type() == &PortType::Physical {
                 debug!("Supported filters on port {}:", port.port_id());
                 for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
                     let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
@@ -160,7 +160,7 @@ pub fn macswap() {
             ));
 
             // start the controller
-            spawn_recv_thread(mrx, context, configuration);
+            spawn_recv_thread(mrx, context);
 
             // give threads some time to do initialization work
             thread::sleep(Duration::from_millis(1000 as u64));
