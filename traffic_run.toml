@@ -3,19 +3,19 @@ name        = "TcpGenerator"
 master_core = 0
 pool_size   = 2048              # default 2048
 cache_size  = 128               # default 32
-cores       = [  1, 2, 3, 5, 6, 7]
+cores       = [  1, 2, 3, 5, ]
 ports       = [ 
-                    { name="7:00.0", rxd= 4096, txd= 4096, cores = [ 1, 2, 3, 5, 6, 7 ],  checksum = false, kni="kni:1", fdir = { pballoc="RteFdirPballoc256k", mode="RteFdirModePerfect", ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFF"}, src_port_mask="0", dst_port_mask="E000"}, flow_steering= "Ip"  },
+                    { name="7:00.0", rxd= 4096, txd= 4096, cores = [ 1, 2, 3, 5, ],  checksum = false, kni="virtio:virtio_user0", fdir = { pballoc="RteFdirPballoc256k", mode="RteFdirModePerfect", ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFF"}, src_port_mask="0", dst_port_mask="E000"}, flow_steering= "Port"  },
 
                     { name="kni:1", rxd=64, txd=64, cores = [1], k_cores = [0], namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24" },
 
-                    { name="virtio:virtio_user0,path=/dev/vhost-net,iface=tap01,queue_size=1024", rxd=64, txd=64, cores = [1], k_cores = [0], namespace="virtio01", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24"  }
+                    { name="virtio:virtio_user0,path=/dev/vhost-net,iface=tap01,queues={},queue_size=1024", rxd=64, txd=64, cores = [1], k_cores = [0], namespace="virtio01", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24"  }
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
 [trafficengine]
-engine      = { port=20001, timeouts= { established= 10000 }, cps_limit=61000, max_open= 1000, detailed_records = false, fin_by_client= 1000, fin_by_server= 1   }
+engine      = { port=20001, timeouts= { established= 10000 }, cps_limit=265000, max_open= 2000, detailed_records = false, fin_by_client= 1000, fin_by_server= 1   }
 targets     = [ { id = "proxy", ip = "192.168.222.8", mac="3c:fd:fe:9e:ce:4c" , port = 19999 },
               ]
 
-test_size   = 1
+test_size   = 200000
