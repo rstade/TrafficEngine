@@ -14,10 +14,11 @@ use netfcts::timer_wheel::TimerWheel;
 use PipelineId;
 
 use netfcts::tcp_common::*;
-use netfcts::{RecordStore, ConRecord, ConRecordOperations, HasTcpState};
+use netfcts::conrecord::{ConRecord, HasTcpState};
 use netfcts::utils::shuffle_ports;
+use netfcts::{RecordStore, ConRecordOperations};
+use netfcts::recstore::TEngineStore;
 
-pub type TEngineStore = RecordStore<ConRecord>;
 
 //#[repr(align(64))]
 #[derive(Debug)]

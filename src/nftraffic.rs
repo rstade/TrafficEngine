@@ -5,9 +5,7 @@ use e2d2::interface::*;
 use e2d2::queues::{new_mpsc_queue_pair, new_mpsc_queue_pair_with_size};
 use e2d2::utils;
 
-use std::sync::mpsc::{Sender, channel};
-use std::sync::Arc;
-use std::collections::HashMap;
+use std::sync::mpsc::channel;
 use std::sync::atomic::Ordering;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -17,20 +15,21 @@ use separator::Separatable;
 
 use netfcts::tcp_common::{TcpState, TcpStatistics, TcpCounter, TcpRole, CData, L234Data, ReleaseCause, tcp_payload_size};
 use cmanager::{Connection, ConnectionManagerC, ConnectionManagerS};
-use EngineConfig;
-use netfcts::system::SystemData;
+use ::{Configuration};
 #[cfg(feature = "profiling")]
 use netfcts::utils::TimeAdder;
-use {PipelineId, MessageFrom, MessageTo, TaskType, Timeouts};
+use {PipelineId, MessageFrom, MessageTo, TaskType};
+use netfcts::utils::Timeouts;
 use netfcts::tasks::{PRIVATE_ETYPE_PACKET, PRIVATE_ETYPE_TIMER, ETYPE_IPV4};
 use netfcts::tasks::{private_etype, PacketInjector, TickGenerator, install_task};
 use netfcts::timer_wheel::TimerWheel;
-use netfcts::prepare_checksum_and_ttl;
+use netfcts::{prepare_checksum_and_ttl, RunConfiguration};
 use netfcts::set_header;
 use netfcts::remove_tcp_options;
 use netfcts::{make_reply_packet, strip_payload};
+use netfcts::recstore::TEngineStore;
 
-use {TEngineStore, FnPayload };
+use FnPayload;
 use std::convert::TryFrom;
 
 
@@ -43,25 +42,24 @@ const SEQN_SHIFT: usize = 4;
 
 pub fn setup_generator<FPL>(
     core: i32,
-    nr_connections: usize, //# of connections to setup per pipeline
     pci: CacheAligned<PortQueueTxBuffered>,
     kni: CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
-    engine_config: &EngineConfig,
+    run_configuration: RunConfiguration<Configuration>,
     servers: Vec<L234Data>,
-    flowdirector_map: &HashMap<u16, Arc<FlowDirector>>,
-    tx: &Sender<MessageFrom<TEngineStore>>,
-    system_data: SystemData,
     f_set_payload: Box<FPL>,
 ) where
     FPL: FnPayload,
 {
     let mut me: L234Data = TryFrom::try_from(kni.port.net_spec().as_ref().unwrap().clone()).unwrap();
-    let l4flow_for_this_core = flowdirector_map
+    let l4flow_for_this_core = run_configuration
+        .flowdirector_map
         .get(&pci.port_queue.port_id())
         .unwrap()
         .get_flow(pci.port_queue.rxq());
     me.ip = l4flow_for_this_core.ip; // in case we use destination IP address for flow steering
+    let engine_config = &run_configuration.engine_configuration.engine;
+    let system_data = run_configuration.system_data.clone();
     me.port = engine_config.port;
 
     let pipeline_id = PipelineId {
@@ -70,6 +68,8 @@ pub fn setup_generator<FPL>(
         rxq: pci.port_queue.rxq(),
     };
     debug!("enter setup_generator {}", pipeline_id);
+
+    let tx = run_configuration.remote_sender.clone();
 
     let detailed_records = engine_config.detailed_records.unwrap_or(false);
     let mut cm_c = ConnectionManagerC::new(
@@ -121,7 +121,6 @@ pub fn setup_generator<FPL>(
     // we send the transmitter to the remote receiver of our messages
     tx.send(MessageFrom::Channel(pipeline_id.clone(), remote_tx)).unwrap();
 
-    // forwarding frames coming from KNI to PCI, if we run queue 0
     let forward2pci = ReceiveBatch::new(kni.clone()).send(pci.clone());
     let uuid = Uuid::new_v4();
     let name = String::from("Kni2Pci");
@@ -587,6 +586,7 @@ pub fn setup_generator<FPL>(
         let mut ready_connection = None;
         let server_listen_port = cm_c.listen_port();
 
+        let nr_connections = run_configuration.engine_configuration.test_size.unwrap_or(128);
         // check if we got a packet from generator
         match (pdu.headers().mac(0).etype(), pdu.headers().tcp(2).dst_port()) {
             // SYN injection

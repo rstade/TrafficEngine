@@ -13,30 +13,25 @@ extern crate uuid;
 extern crate log;
 extern crate traffic_lib;
 
-use e2d2::config::{basic_opts, read_matches};
-use e2d2::interface::{PortType, PortQueue,};
-use e2d2::native::zcsi::*;
-use e2d2::scheduler::{initialize_system, NetBricksContext, StandaloneScheduler, Scheduler, Runnable};
+use e2d2::interface::{ PortQueue,};
+use e2d2::scheduler::{ StandaloneScheduler, Scheduler, Runnable};
 use e2d2::allocators::CacheAligned;
 use e2d2::operators::{ReceiveBatch, Batch, TransformBatch};
 
-use netfcts::comm::{MessageFrom, MessageTo};
-//use traffic_lib::{read_config,};
-use traffic_lib::spawn_recv_thread;
-use traffic_lib::TEngineStore;
+use netfcts::comm::{MessageFrom};
+use netfcts::RunTime;
 
+use traffic_lib::Configuration;
 use std::collections::{HashSet};
-use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
 use std::fs::File;
+use std::process;
 
 use uuid::Uuid;
 use std::io::Read;
-
 
 pub fn nf_macswap<T: 'static + Batch>(parent: T) -> TransformBatch<T> {
     parent.transform(box move |pkt| {
@@ -72,43 +67,29 @@ where
 
 #[test]
 pub fn macswap() {
-    env_logger::init();
     info!("Starting MacSwap ..");
 
     // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
     let mut f = File::open("./tests/toml_file.txt").expect("file not found");
     let mut toml_file = String::new();
     f.read_to_string(&mut toml_file)
-        .expect("something went wrong reading toml_file.txt");
+        .expect("something went wrong reading ./tests/toml_file.txt");
 
-    let log_level_rte = if log_enabled!(log::Level::Debug) {
-        RteLogLevel::RteLogDebug
-    } else {
-        RteLogLevel::RteLogInfo
+    let mut run_time: RunTime<Configuration> = match RunTime::init_with_toml_file(&toml_file) {
+        Ok(run_time) => run_time,
+        Err(err) => panic!("failed to initialize RunTime {}", err),
     };
-    unsafe {
-        rte_log_set_global_level(log_level_rte);
-        rte_log_set_level(RteLogtype::RteLogtypePmd, log_level_rte);
-        info!("dpdk log global level: {}", rte_log_get_global_level());
-        info!("dpdk log level for PMD: {}", rte_log_get_level(RteLogtype::RteLogtypePmd));
-    }
 
-    //let configuration = read_config(&toml_file.trim()).unwrap();
+    // setup flowdirector for physical ports:
+    run_time.setup_flowdirector().expect("failed to setup flowdirector");
 
-    fn am_root() -> bool {
-        match env::var("USER") {
-            Ok(val) => val == "root",
-            Err(_e) => false,
-        }
-    }
+    let run_configuration = &run_time.run_configuration.clone();
 
-    if !am_root() {
-        error!(
-            " ... must run as root, e.g.: sudo -E env \"PATH=$PATH\" $executable, see also test.sh\n\
-             Do not run 'cargo test' as root."
-        );
-        std::process::exit(1);
-    }
+    if run_configuration.engine_configuration.test_size.is_none() {
+        error!("missing parameter 'test_size' in configuration file {}", toml_file.trim());
+        process::exit(1);
+    };
+
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -118,73 +99,36 @@ pub fn macswap() {
     })
     .expect("error setting Ctrl-C handler");
 
-    let opts = basic_opts();
 
-    let args: Vec<String> = vec!["trafficengine", "-f", &toml_file.trim()]
-        .iter()
-        .map(|x| x.to_string())
-        .collect::<Vec<String>>();
-    let matches = match opts.parse(&args[1..]) {
-        Ok(m) => m,
-        Err(f) => panic!(f.to_string()),
-    };
-    let mut netbricks_configuration = read_matches(&matches, &opts);
+    run_time.start_schedulers().expect("cannot start schedulers");
 
-    fn check_system(context: NetBricksContext) -> e2d2::common::Result<NetBricksContext> {
-        for port in context.ports.values() {
-            if port.port_type() == &PortType::Physical {
-                debug!("Supported filters on port {}:", port.port_id());
-                for i in RteFilterType::RteEthFilterNone as i32 + 1..RteFilterType::RteEthFilterMax as i32 {
-                    let result = unsafe { rte_eth_dev_filter_supported(port.port_id() as u16, RteFilterType::from(i)) };
-                    debug!("{0: <30}: {1: >5}", RteFilterType::from(i), result);
-                }
-            }
-        }
-        Ok(context)
+    run_time
+        .add_pipeline_to_run(Box::new(
+            move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| test(p, s, core),
+        ))
+        .expect("cannot install pipelines");
+
+    // start the controller
+    run_time.start();
+
+    // give threads some time to do initialization work
+    thread::sleep(Duration::from_millis(1000 as u64));
+
+    let (mtx, _reply_mrx) = run_time.get_main_channel().expect("cannot get main channel");
+    // start generator
+    mtx.send(MessageFrom::StartEngine).unwrap();
+
+    thread::sleep(Duration::from_millis(1000 as u64));
+
+    //main loop
+    println!("press ctrl-c to terminate MacSwap ...");
+    while running.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
     }
 
-    match initialize_system(&mut netbricks_configuration)
-        .map_err(|e| e.into())
-        .and_then(|ctxt| check_system(ctxt))
-    {
-        Ok(mut context) => {
-            context.start_schedulers();
 
-            let (mtx, mrx) = channel::<MessageFrom<TEngineStore>>();
-            let (reply_mtx, _reply_mrx) = channel::<MessageTo<TEngineStore>>();
+    mtx.send(MessageFrom::Exit).unwrap();
 
-            context.add_pipeline_to_run(Box::new(
-                move |core: i32, p: HashSet<CacheAligned<PortQueue>>, s: &mut StandaloneScheduler| {
-                    test(p, s, core);
-                },
-            ));
-
-            // start the controller
-            spawn_recv_thread(mrx, context);
-
-            // give threads some time to do initialization work
-            thread::sleep(Duration::from_millis(1000 as u64));
-
-            // start generator
-            mtx.send(MessageFrom::StartEngine(reply_mtx)).unwrap();
-
-            thread::sleep(Duration::from_millis(1000 as u64));
-
-            //main loop
-            println!("press ctrl-c to terminate MacSwap ...");
-            while running.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-            }
-
-
-            mtx.send(MessageFrom::Exit).unwrap();
-
-            thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
-            std::process::exit(0);
-        }
-        Err(ref e) => {
-            error!("Error: {}", e);
-            std::process::exit(1);
-        }
-    }
+    thread::sleep(Duration::from_millis(200 as u64)); // Sleep for a bit
+    std::process::exit(0);
 }
