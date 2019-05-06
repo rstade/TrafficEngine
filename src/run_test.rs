@@ -39,6 +39,7 @@ use {CData, L234Data, Connection, Configuration};
 use {MessageFrom, MessageTo};
 use ReleaseCause;
 use {TcpState, TcpStatistics};
+use netfcts::recstore::TEngineStore;
 
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,12 +51,9 @@ pub enum TestType {
 // we use this function for the integration tests
 pub fn run_test(test_type: TestType) {
     // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
-    let mut f = File::open("./tests/toml_file.txt").expect("file not found");
-    let mut toml_file = String::new();
-    f.read_to_string(&mut toml_file)
-        .expect("something went wrong reading ./tests/toml_file.txt");
+    const INDIRECTION_FILE: &str = "./tests/toml_file.txt";
 
-    let mut run_time: RunTime<Configuration> = match RunTime::init_with_toml_file(&toml_file) {
+    let mut run_time: RunTime<Configuration, TEngineStore> = match RunTime::init_indirectly(INDIRECTION_FILE) {
         Ok(run_time) => run_time,
         Err(err) => panic!("failed to initialize RunTime {}", err),
     };
@@ -63,17 +61,20 @@ pub fn run_test(test_type: TestType) {
     // setup flowdirector for physical ports:
     run_time.setup_flowdirector().expect("failed to setup flowdirector");
 
-    let run_configuration = &run_time.run_configuration.clone();
+    let run_configuration = run_time.run_configuration.clone();
+    let configuration = &run_configuration.engine_configuration;
 
-    if run_configuration.engine_configuration.test_size.is_none() {
-        error!("missing parameter 'test_size' in configuration file {}", toml_file.trim());
+    if configuration.test_size.is_none() {
+        error!(
+            "missing parameter 'test_size' in configuration file {}",
+            run_time.toml_filename()
+        );
         process::exit(1);
     };
 
     // number of payloads sent, after which the connection is closed
-    let fin_by_client = run_configuration.engine_configuration.engine.fin_by_client.unwrap_or(1000);
-    let _fin_by_server = run_configuration.engine_configuration.engine.fin_by_server.unwrap_or(1);
-
+    let fin_by_client = configuration.engine.fin_by_client.unwrap_or(1000);
+    let _fin_by_server = configuration.engine.fin_by_server.unwrap_or(1);
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -83,8 +84,7 @@ pub fn run_test(test_type: TestType) {
     })
     .expect("error setting Ctrl-C handler");
 
-    let l234data: Vec<L234Data> = run_configuration
-        .engine_configuration
+    let l234data: Vec<L234Data> = configuration
         .targets
         .iter()
         .enumerate()
@@ -136,7 +136,7 @@ pub fn run_test(test_type: TestType) {
 
     run_time.start_schedulers().expect("cannot start schedulers");
 
-    let run_time_cloned = run_configuration.clone();
+    let run_configuration_cloned = run_configuration.clone();
 
     run_time
         .install_pipeline_on_cores(Box::new(
@@ -145,7 +145,7 @@ pub fn run_test(test_type: TestType) {
                     core,
                     pmd_ports,
                     s,
-                    run_time_cloned.clone(),
+                    run_configuration_cloned.clone(),
                     l234data.clone(),
                     f_set_payload.clone(),
                 );

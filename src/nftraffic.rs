@@ -45,7 +45,7 @@ pub fn setup_generator<FPL>(
     pci: CacheAligned<PortQueueTxBuffered>,
     kni: CacheAligned<PortQueue>,
     sched: &mut StandaloneScheduler,
-    run_configuration: RunConfiguration<Configuration>,
+    run_configuration: RunConfiguration<Configuration, TEngineStore>,
     servers: Vec<L234Data>,
     f_set_payload: Box<FPL>,
 ) where

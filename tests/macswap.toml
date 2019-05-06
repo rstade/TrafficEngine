@@ -12,7 +12,7 @@ ports       = [
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
-[trafficengine]
+[engine]
 
 engine       = { flow_steering= "Ip", namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24", port=999, timeouts= { established= 1800 } }
 

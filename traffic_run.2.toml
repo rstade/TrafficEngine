@@ -10,7 +10,7 @@ ports       = [
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
-[trafficengine]
+[engine]
 
 engine      = { flow_steering= "Ip", namespace="nskni", mac="3c:fd:fe:9e:ce:4c", ipnet="192.168.222.2/24", port=20001, timeouts= { established= 10000 }, cps_limit= 90000  }
 targets     = [ { id = "proxy", ip = "192.168.222.8", mac="a0:36:9f:82:9c:fc", port = 999 },

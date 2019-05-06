@@ -14,7 +14,7 @@ ports       = [
               ] 
 vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
-[trafficengine]
+[engine]
 
 engine      = {  port=999, timeouts= { established= 10000 }, cps_limit= 100000, detailed_records= true, fin_by_client= 3, fin_by_server= 3 }
 

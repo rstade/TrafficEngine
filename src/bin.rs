@@ -27,6 +27,8 @@ use netfcts::conrecord::{ConRecord, HasTcpState, HasConData};
 use netfcts::io::print_rx_tx_counters;
 use netfcts::tcp_common::{CData, tcp_payload_size};
 use netfcts::{strip_payload, RecordStore};
+use netfcts::recstore::TEngineStore;
+
 use netfcts::RunTime;
 
 use traffic_lib::{setup_pipelines, Connection, Configuration};
@@ -226,7 +228,7 @@ fn evaluate_records(
 }
 
 pub fn main() {
-    let mut run_time: RunTime<Configuration> = match RunTime::init() {
+    let mut run_time: RunTime<Configuration, TEngineStore> = match RunTime::init() {
         Ok(run_time) => run_time,
         Err(err) => panic!("failed to initialize RunTime {}", err),
     };

@@ -37,7 +37,7 @@ use uuid::Uuid;
 use e2d2::scheduler::*;
 use e2d2::interface::{ PmdPort, Pdu, };
 
-use nftraffic::*;
+use nftraffic::setup_generator;
 use netfcts::tasks::*;
 use netfcts::comm::{MessageFrom, MessageTo, PipelineId};
 use netfcts::{new_port_queues_for_core, physical_ports_for_core, RunConfiguration};
@@ -89,7 +89,7 @@ pub fn setup_pipelines<FPL>(
     core: i32,
     pmd_ports: HashMap<String, Arc<PmdPort>>,
     sched: &mut StandaloneScheduler,
-    run_configuration: RunConfiguration<Configuration>,
+    run_configuration: RunConfiguration<Configuration, TEngineStore>,
     servers: Vec<L234Data>,
     f_set_payload: Box<FPL>,
 ) where
