@@ -13,7 +13,7 @@ extern crate log;
 extern crate traffic_lib;
 
 
-use e2d2::interface::{ PmdPort, Pdu, HeaderStack};
+use e2d2::interface::{PmdPort, Pdu, HeaderStack};
 use e2d2::native::zcsi::*;
 use e2d2::scheduler::StandaloneScheduler;
 use e2d2::utils;
@@ -44,7 +44,6 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::time::Duration;
 use std::io::{Write, BufWriter};
-use std::error::Error;
 use std::fs::File;
 use std::net::{SocketAddrV4, Ipv4Addr};
 use std::mem;
@@ -107,7 +106,7 @@ fn evaluate_records(
 ) {
     println!("\nperformance data derived from connection records:");
     let file = match File::create("c_records.txt") {
-        Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
+        Err(why) => panic!("couldn't create c_records.txt: {}", why),
         Ok(file) => file,
     };
     let mut f = BufWriter::new(file);
@@ -228,6 +227,8 @@ fn evaluate_records(
 }
 
 pub fn main() {
+    env_logger::init();
+
     let mut run_time: RunTime<Configuration, TEngineStore> = match RunTime::init() {
         Ok(run_time) => run_time,
         Err(err) => panic!("failed to initialize RunTime {}", err),

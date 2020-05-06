@@ -11,7 +11,6 @@ use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream, Shutdown, Ipv4A
 use std::sync::mpsc::RecvTimeoutError;
 use std::collections::HashMap;
 use std::io::{Read, Write, BufWriter};
-use std::error::Error;
 use std::fs::File;
 use std::vec::Vec;
 use std::process;
@@ -19,7 +18,7 @@ use std::u64;
 
 use bincode::{serialize_into};
 
-use e2d2::interface::{ PmdPort, Pdu, FlowSteeringMode};
+use e2d2::interface::{PmdPort, Pdu, FlowSteeringMode};
 use e2d2::scheduler::StandaloneScheduler;
 use e2d2::utils;
 
@@ -50,6 +49,8 @@ pub enum TestType {
 
 // we use this function for the integration tests
 pub fn run_test(test_type: TestType) {
+    env_logger::init();
+
     // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
     const INDIRECTION_FILE: &str = "./tests/toml_file.txt";
 
@@ -351,7 +352,7 @@ pub fn run_test(test_type: TestType) {
         .unwrap_or(false)
     {
         let file = match File::create("c_records.txt") {
-            Err(why) => panic!("couldn't create c_records.txt: {}", why.description()),
+            Err(why) => panic!("couldn't create c_records.txt: {}", why),
             Ok(file) => file,
         };
         let mut f = BufWriter::new(file);
@@ -465,7 +466,7 @@ pub fn run_test(test_type: TestType) {
     }
     mtx.send(MessageFrom::Exit).unwrap();
     thread::sleep(Duration::from_millis(2000));
-    println!("PASSED");
+    println!("*** *** PASSED *** ***");
     debug!("terminating TrafficEngine");
     process::exit(0);
 }
