@@ -19,7 +19,7 @@ The required NetBricks version is tagged (starting with v0.2.0).
 Install NetBricks locally on your (virtual) machine by following the description of NetBricks. 
 The installation path of e2d2 needs to be updated in the dependency section of Cargo.toml of TrafficEngine. 
 
-Note, that a local installation of NetBricks is necessary as it includes DPDK and some C-libraries for interfacing the Rust code of NetBricks with the DPDK. As we need DPDK kernel modules, DPDK needs to be re-compiled each time the kernel version changes. This can be done with the script [build.sh](https://github.com/rstade/NetBricks/blob/e2d2-rstade/build.sh) of NetBricks. Note also that the Linux linker _ld_ needs to be made aware of the location of the .so libraries created by NetBricks. This can be solved using _ldconfig_.
+Note, that a local installation of NetBricks is necessary as it includes DPDK and some C-libraries for interfacing the Rust code of NetBricks with the DPDK. If the optional KNI interface is needed, the DPDK kernel module needs to be re-compiled each time the kernel version changes. This can be done with the script [build.sh](https://github.com/rstade/NetBricks/blob/e2d2-rstade/build.sh) of NetBricks. Note also that the Linux linker _ld_ needs to be made aware of the location of the .so libraries created by NetBricks. This can be solved using _ldconfig_.
 
 Secondly, TrafficEngine depends on the crate [netfcts](https://github.com/rstade/netfcts). 
 netfcts is an extension to NetBricks with helper functions and data structures, 

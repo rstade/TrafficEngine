@@ -50,6 +50,7 @@ pub enum TestType {
 // we use this function for the integration tests
 pub fn run_test(test_type: TestType) {
     env_logger::init();
+    debug!("*** run_test logging is in debug mode ***");
 
     // cannot directly read toml file from command line, as cargo test owns it. Thus we take a detour and read it from a file.
     const INDIRECTION_FILE: &str = "./tests/toml_file.txt";

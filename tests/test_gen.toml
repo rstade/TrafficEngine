@@ -7,12 +7,12 @@ pool_size   = 2048              # default 2048
 cache_size  = 128               # default 32
 cores       = [ 1, 2, 3 ]
 ports       = [ 
-                    { name="7:00.0", rxd= 1024, txd= 4096, cores = [ 1, 2, 3 ], checksum = false, kni="virtio:virtio_user0", driver= "Ixgbe", fdir = { pballoc="RteFdirPballoc256k", mode="RteFdirModePerfect", ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFF"}, src_port_mask="0", dst_port_mask="C000"}, flow_steering= "Port"},
-                    { name="kni:1", rxd=64, txd=64, cores = [1, 2], k_cores = [0], namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24" },
+                    { name="7:00.0", rxd= 1024, txd= 4096, cores = [ 1, 2, 3 ], checksum = false, kni="virtio:virtio_user0", driver= "Ixgbe", fdir = { pballoc="RteFdirPballoc256k", mode="RteFdirModePerfect", ipv4_mask= {src_ip="0.0.0.0", dst_ip="FFFFFFFE"}, src_port_mask="0", dst_port_mask="C000"}, flow_steering= "Port"},
+#                    { name="kni:1", rxd=64, txd=64, cores = [1, 2], k_cores = [0], namespace="nskni", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24" },
                     { name="virtio:virtio_user0,path=/dev/vhost-net,iface=tap00,queues={},queue_size=1024", cores=[1], rxd=1024, txd=1024,  namespace="nsvirtio_0", mac="a0:36:9f:82:9c:fc", ipnet="192.168.222.2/24"  },
 
               ] 
-vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
+#vdev        = [ "net_kni0" ]    # for use of vdev with KNI PMD, see https://dpdk.org/doc/guides/nics/kni.html
 
 [engine]
 
@@ -26,4 +26,4 @@ targets     = [ { id = "server 1", ip = "192.168.222.32", linux_if="enp7s0f1" , 
                 { id = "server 6", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12350 },
                 { id = "server 7", ip = "192.168.222.32", linux_if="enp7s0f1" , port = 12351 },
               ]
-test_size   = 4
+test_size   = 6

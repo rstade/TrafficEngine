@@ -14,7 +14,6 @@ extern crate traffic_lib;
 
 
 use e2d2::interface::{PmdPort, Pdu, HeaderStack};
-use e2d2::native::zcsi::*;
 use e2d2::scheduler::StandaloneScheduler;
 use e2d2::utils;
 
@@ -51,6 +50,7 @@ use std::cmp;
 
 use bincode::serialize_into;
 use separator::Separatable;
+use e2d2::native::zcsi::rte_ethdev_api::{rte_eth_stats_get, rte_eth_stats};
 
 
 fn print_performance_from_stamps(cpu_clock: u64, nr_connections: usize, start_stop_stamps: HashMap<PipelineId, (u64, u64)>) {
@@ -79,10 +79,10 @@ fn print_performance_from_stamps(cpu_clock: u64, nr_connections: usize, start_st
         );
     }
 
-    let stats = RteEthStats::new();
+    let mut stats = rte_eth_stats::new();
     let retval;
     unsafe {
-        retval = rte_eth_stats_get(1u16, &stats as *const RteEthStats);
+        retval = rte_eth_stats_get(1u16, &mut stats);
     }
     if retval != 0 {
         panic!("rte_eth_stats_get failed");
