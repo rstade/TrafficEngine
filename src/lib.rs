@@ -29,13 +29,13 @@ pub use netfcts::tcp_common::{CData, L234Data, ReleaseCause, UserData, TcpRole, 
 pub use netfcts::conrecord::ConRecord;
 pub use netfcts::recstore::TEngineStore;
 
-pub use cmanager::{ Connection};
+pub use cmanager::{Connection};
 
 use eui48::MacAddress;
 use uuid::Uuid;
 
 use e2d2::scheduler::*;
-use e2d2::interface::{ PmdPort, Pdu, };
+use e2d2::interface::{PmdPort, Pdu};
 
 use nftraffic::setup_generator;
 use netfcts::tasks::*;

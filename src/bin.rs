@@ -13,9 +13,9 @@ extern crate log;
 extern crate traffic_lib;
 
 
+use std::arch::x86_64::_rdtsc;
 use e2d2::interface::{PmdPort, Pdu, HeaderStack};
 use e2d2::scheduler::StandaloneScheduler;
-use e2d2::utils;
 
 use netfcts::comm::{MessageFrom, MessageTo};
 use netfcts::comm::PipelineId;
@@ -178,7 +178,7 @@ fn evaluate_records(
                 {
                     completed_count_c += 1
                 }
-                if c.get_first_stamp().unwrap_or(u64::max_value()) < min.get_first_stamp().unwrap_or(u64::max_value()) {
+                if c.get_first_stamp().unwrap_or(u64::MAX) < min.get_first_stamp().unwrap_or(u64::MAX) {
                     min = c
                 }
                 if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {
@@ -194,7 +194,7 @@ fn evaluate_records(
                     );
                 }
             });
-            if min.get_first_stamp().unwrap_or(u64::max_value()) < min_total.get_first_stamp().unwrap_or(u64::max_value()) {
+            if min.get_first_stamp().unwrap_or(u64::MAX) < min_total.get_first_stamp().unwrap_or(u64::MAX) {
                 min_total = min.clone()
             }
             if max.get_last_stamp().unwrap_or(0) > max_total.get_last_stamp().unwrap_or(0) {
@@ -294,7 +294,7 @@ pub fn main() {
                 return 0;
             } else if pp < fin_by_client_clone && c.state() < TcpState::CloseWait {
                 strip_payload(p);
-                let stamp = utils::rdtsc_unsafe();
+                let stamp = unsafe { _rdtsc() };
                 let buf = stamp.to_be_bytes();
                 let ip_sz = p.headers().ip(1).length();
                 p.add_to_payload_tail(buf.len()).expect("insufficient tail room for u64");

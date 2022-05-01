@@ -35,7 +35,7 @@ For some integration tests both interfaces must be interconnected. In case of ph
 
 In addition some parameters like the Linux interface name (linux_if) and the IP / MAC addresses in the test module configuration files  tests/*.toml need to be adapted. 
 
-Latest code of TrafficEngine is tested on a 2-socket NUMA server, each socket hosting 4 physical cores, running the real-time kernel of Centos 7.5.
+Below test results are achieved on a 2-socket NUMA server, each socket hosting 4 physical cores, running the real-time kernel of Centos 7.5.
 
 **_Testing_**
 

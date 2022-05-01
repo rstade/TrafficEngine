@@ -3,6 +3,7 @@ extern crate e2d2;
 extern crate ipnet;
 extern crate bincode;
 
+use std::arch::x86_64::_rdtsc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -14,13 +15,11 @@ use std::io::{Read, Write, BufWriter};
 use std::fs::File;
 use std::vec::Vec;
 use std::process;
-use std::u64;
 
 use bincode::{serialize_into};
 
 use e2d2::interface::{PmdPort, Pdu, FlowSteeringMode};
 use e2d2::scheduler::StandaloneScheduler;
-use e2d2::utils;
 
 use separator::Separatable;
 use netfcts::RunTime;
@@ -124,7 +123,7 @@ pub fn run_test(test_type: TestType) {
                 return 0;
             } else if pp < fin_by_client_clone && c.state() < TcpState::CloseWait {
                 strip_payload(p);
-                let stamp = utils::rdtsc_unsafe();
+                let stamp = unsafe { _rdtsc() };
                 let buf = stamp.to_be_bytes();
                 let ip_sz = p.headers().ip(1).length();
                 p.add_to_payload_tail(buf.len()).expect("insufficient tail room for u64");
@@ -266,11 +265,9 @@ pub fn run_test(test_type: TestType) {
                     debug!("test connection {}: TCP connect to engine successful", ntry);
                     stream.set_write_timeout(Some(timeout)).unwrap();
                     stream.set_read_timeout(Some(timeout)).unwrap();
-                    let cdata = CData::new(
-                        SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080),
-                        0xFFFF,
-                        utils::rdtsc_unsafe(),
-                    );
+                    let cdata = CData::new(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8080), 0xFFFF, unsafe {
+                        _rdtsc()
+                    });
                     //let json_string = serde_json::to_string(&cdata).expect("cannot serialize cdata");
                     //stream.write(json_string.as_bytes()).expect("cannot write to stream");
                     let bin_vec = bincode::serialize(&cdata).expect("cannot serialize cdata");
@@ -372,9 +369,7 @@ pub fn run_test(test_type: TestType) {
                             if c.states().last().unwrap() == &TcpState::Closed {
                                 completed_count += 1
                             }
-                            if c.get_first_stamp().unwrap_or(u64::max_value())
-                                < min.get_first_stamp().unwrap_or(u64::max_value())
-                            {
+                            if c.get_first_stamp().unwrap_or(u64::MAX) < min.get_first_stamp().unwrap_or(u64::MAX) {
                                 min = c
                             }
                             if c.get_last_stamp().unwrap_or(0) > max.get_last_stamp().unwrap_or(0) {

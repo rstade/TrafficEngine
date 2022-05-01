@@ -16,14 +16,14 @@ case $TASK in
         executable=`cargo test $2 $3 $4 --no-run --message-format=json --test test_as_client | jq -r 'select((.profile.test == true) and (.target.name == "test_as_client")) | .filenames[]'`
         echo $executable
         echo ./tests/test_gen.toml > tests/toml_file.txt
-        sudo -E env "PATH=$PATH" $executable --nocapture
+        sudo -E env "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" $executable --nocapture
         ;;
     test_as_server)
         export RUST_LOG="traffic_lib=info,e2d2=info,netfcts=info", RUST_BACKTRACE=1
         executable=`cargo test $2 $3 $4 --no-run --message-format=json --test test_as_server | jq -r 'select((.profile.test == true) and (.target.name == "test_as_server")) | .filenames[]'`
         echo $executable
         echo ./tests/test_gen.toml > tests/toml_file.txt
-        sudo -E env "PATH=$PATH" $executable --nocapture
+        sudo -E env "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" $executable --nocapture
         ;;
     macswap)
         export RUST_LOG="traffic_lib=info,macswap=info,e2d2=info,netfcts=info", RUST_BACKTRACE=1
@@ -37,7 +37,7 @@ case $TASK in
         executable=`cargo test $2 --no-run --message-format=json --test test_as_client | jq -r 'select((.profile.test == true) and (.target.name == "test_as_client")) | .filenames[]'`
         echo $executable
         echo ./tests/test_gen.2.toml > tests/toml_file.txt
-        sudo -E env "PATH=$PATH" $executable --nocapture
+        sudo -E env "PATH=$PATH; LD_LIBRARY_PATH=$LD_LIBRARY_PATH" $executable --nocapture
         ;;
     test_as_server.2)
         export RUST_LOG="traffic_lib=info,test_as_server=info,e2d2=info,netfcts=info", RUST_BACKTRACE=1

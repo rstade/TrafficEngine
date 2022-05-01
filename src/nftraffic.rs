@@ -3,19 +3,19 @@ use e2d2::scheduler::{Runnable, Scheduler, StandaloneScheduler};
 use e2d2::allocators::CacheAligned;
 use e2d2::interface::*;
 use e2d2::queues::{new_mpsc_queue_pair, new_mpsc_queue_pair_with_size};
-use e2d2::utils;
 
 use std::sync::mpsc::channel;
 use std::sync::atomic::Ordering;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::arch::x86_64::_rdtsc;
 
 use uuid::Uuid;
-use bincode::{ deserialize};
+use bincode::{deserialize};
 use separator::Separatable;
 
 use netfcts::tcp_common::{TcpState, TcpStatistics, TcpCounter, TcpRole, CData, L234Data, ReleaseCause, tcp_payload_size};
 use cmanager::{Connection, ConnectionManagerC, ConnectionManagerS};
-use ::{Configuration};
+use {Configuration};
 #[cfg(feature = "profiling")]
 use netfcts::utils::TimeAdder;
 use {PipelineId, MessageFrom, MessageTo, TaskType};
@@ -153,7 +153,7 @@ pub fn setup_generator<FPL>(
 
         #[inline]
         fn add_hold(&mut self, start_low28bit: u32) {
-            let mut now = (utils::rdtscp_unsafe() & 0x000000000FFFFFFF) as u32;
+            let mut now = unsafe { (_rdtsc() & 0x000000000FFFFFFF) as u32 };
             if now <= start_low28bit {
                 // at least one overflow
                 now += 0x10000000;
@@ -280,7 +280,7 @@ pub fn setup_generator<FPL>(
     let group_by_closure = box move |pdu: &mut Pdu| {
         // this is the major closure for TCP processing
 
-        let now = || utils::rdtsc_unsafe().separated_string();
+        let now = || unsafe { _rdtsc() }.separated_string();
 
         let _syn_injector_start = || {
             debug!("{} (re-)starting the injector at {}", thread_id, now());
@@ -314,7 +314,7 @@ pub fn setup_generator<FPL>(
             remove_tcp_options(p);
             make_reply_packet(p, 1);
             //generate seq number:
-            c.seqn_nxt = (utils::rdtsc_unsafe() << 8) as u32;
+            c.seqn_nxt = (unsafe { _rdtsc() } << 8) as u32;
             {
                 let tcp = p.headers_mut().tcp_mut(2);
                 tcp.set_seq_num(c.seqn_nxt);
@@ -371,7 +371,7 @@ pub fn setup_generator<FPL>(
             set_header(&servers[c.server_index()], c.port(), p, &me.mac, me.ip);
 
             //generate seq number:
-            c.seqn_nxt = (utils::rdtsc_unsafe() << SEQN_SHIFT) as u32;
+            c.seqn_nxt = (unsafe { _rdtsc() } << SEQN_SHIFT) as u32;
             {
                 let htcp = p.headers_mut().tcp_mut(2);
                 htcp.set_seq_num(c.seqn_nxt);
@@ -445,7 +445,7 @@ pub fn setup_generator<FPL>(
             prepare_checksum_and_ttl(p);
             counter[TcpStatistics::SentFinPssv] += 1;
             counter[TcpStatistics::SentAck4Fin] += 1;
-        };
+        }
 
         #[inline]
         fn active_close(p: &mut Pdu, c: &mut Connection, counter: &mut TcpCounter, state: &TcpState) -> bool {
@@ -494,7 +494,7 @@ pub fn setup_generator<FPL>(
             prepare_checksum_and_ttl(p);
             counter[TcpStatistics::SentAck4Fin] += 1;
             tcp_closed
-        };
+        }
 
         #[inline]
         ///increments ack4fin counter, checks for stop_stamp and updates holding time counter
@@ -507,7 +507,7 @@ pub fn setup_generator<FPL>(
         ) {
             *counter += 1;
             if *counter == nr_connections {
-                *stop_stamp = utils::rdtscp_unsafe()
+                *stop_stamp = unsafe { _rdtsc() }
             }
             hold.add_hold(c.seqn_nxt >> SEQN_SHIFT);
         }
@@ -515,7 +515,7 @@ pub fn setup_generator<FPL>(
         // *****  the closure starts here with processing
 
         #[cfg(feature = "profiling")]
-        let timestamp_entry = utils::rdtsc_unsafe();
+        let timestamp_entry = unsafe { _rdtsc() };
 
         let c_recv_payload = |p: &mut Pdu, c: &mut Connection| {
             let mut b_fin = false;
@@ -592,7 +592,7 @@ pub fn setup_generator<FPL>(
             // SYN injection
             (PRIVATE_ETYPE_PACKET, 1) => {
                 if counter_c[TcpStatistics::SentSyn] == 0 {
-                    start_stamp = utils::rdtscp_unsafe();
+                    start_stamp = unsafe { _rdtsc() };
                 }
                 if counter_c[TcpStatistics::SentSyn] < nr_connections {
                     //info!("syn= {}, ack= {}, open= {}", counter_c[TcpStatistics::SentSyn], counter_c[TcpStatistics::RecvSynAck], cm_c.concurrent_connections());
@@ -612,7 +612,7 @@ pub fn setup_generator<FPL>(
                                 wheel_c.schedule(&(timeouts.established.unwrap() * system_data.cpu_clock / 1000), c.port());
                             group_index = 1;
                             #[cfg(feature = "profiling")]
-                            time_adders[4].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                            time_adders[4].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                         }
                     }
                 } else {
@@ -675,7 +675,7 @@ pub fn setup_generator<FPL>(
                         group_index = 1;
                     }
                     #[cfg(feature = "profiling")]
-                    time_adders[5].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                    time_adders[5].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                 } else {
                     if payload_injector_runs() {
                         payload_injector_stop();
@@ -741,8 +741,8 @@ pub fn setup_generator<FPL>(
                 }
                 // check for timeouts
                 if ticks % wheel_tick_reduction_factor == 0 {
-                    cm_c.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_c);
-                    cm_s.release_timeouts(&utils::rdtsc_unsafe(), &mut wheel_s);
+                    cm_c.release_timeouts(unsafe { &_rdtsc() }, &mut wheel_c);
+                    cm_s.release_timeouts(unsafe { &_rdtsc() }, &mut wheel_s);
                 }
                 #[cfg(feature = "profiling")]
                 {
@@ -753,7 +753,7 @@ pub fn setup_generator<FPL>(
                         || tx_stats_now != rx_tx_stats.last().unwrap().2
                         || rx_stats_now != rx_tx_stats.last().unwrap().1
                     {
-                        rx_tx_stats.push((utils::rdtsc_unsafe(), rx_stats_now, tx_stats_now));
+                        rx_tx_stats.push((unsafe { _rdtsc() }, rx_stats_now, tx_stats_now));
                     }
                 }
             }
@@ -769,7 +769,7 @@ pub fn setup_generator<FPL>(
                     counter_s[TcpStatistics::RecvSyn] += 1;
                     let c = cm_s.get_mut_or_insert(&src_sock);
                     #[cfg(feature = "profiling")]
-                    time_adders[11].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                    time_adders[11].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                     c
                 } else {
                     cm_s.get_mut(&src_sock)
@@ -838,7 +838,7 @@ pub fn setup_generator<FPL>(
                                     counter_s[TcpStatistics::SentSynAck] += 1;
                                     group_index = 1;
                                     #[cfg(feature = "profiling")]
-                                    time_adders[1].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                    time_adders[1].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                                 } else {
                                     warn!("{} received SYN in state {:?}", thread_id, c.states());
                                 }
@@ -858,7 +858,7 @@ pub fn setup_generator<FPL>(
                                     group_index = 1;
                                 }
                                 #[cfg(feature = "profiling")]
-                                time_adders[8].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[8].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                             } else if pdu.headers().tcp(2).rst_flag() {
                                 //trace!("server: received RST");
                                 counter_s[TcpStatistics::RecvRst] += 1;
@@ -873,7 +873,7 @@ pub fn setup_generator<FPL>(
                                         counter_s[TcpStatistics::RecvSynAck2] += 1;
                                         debug!("{} server: connection from DUT ({:?}) established", thread_id, src_sock);
                                         #[cfg(feature = "profiling")]
-                                        time_adders[2].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                        time_adders[2].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                                     }
                                     TcpState::LastAck => {
                                         // received final ack in passive close
@@ -916,7 +916,7 @@ pub fn setup_generator<FPL>(
                         }
 
                         #[cfg(feature = "profiling")]
-                        time_adders[3].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                        time_adders[3].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                     }
                 }
             }
@@ -931,13 +931,13 @@ pub fn setup_generator<FPL>(
                 }
                 let c = cm_c.get_mut_by_port(client_port);
                 #[cfg(feature = "profiling")]
-                time_adders[0].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                time_adders[0].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                 match c {
                     None => {
                         warn!(
                             "{} @ {} client: engine has no state for port {} ({}-{}), sending to KNI i/f",
                             thread_id,
-                            utils::rdtsc_unsafe().separated_string(),
+                            unsafe { _rdtsc() }.separated_string(),
                             client_port,
                             pdu.headers().ip(1),
                             pdu.headers().tcp(2),
@@ -1020,7 +1020,7 @@ pub fn setup_generator<FPL>(
                                     group_index = 1;
                                 }
                                 #[cfg(feature = "profiling")]
-                                time_adders[7].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+                                time_adders[7].add_diff(unsafe { _rdtsc() } - timestamp_entry);
                             } else if pdu.headers().tcp(2).rst_flag() {
                                 counter_c[TcpStatistics::RecvRst] += 1;
                                 c.push_state(TcpState::Closed);
@@ -1104,19 +1104,19 @@ pub fn setup_generator<FPL>(
         if b_release_connection_s {
             cm_s.release(&src_sock, &mut wheel_s);
             #[cfg(feature = "profiling")]
-            time_adders[10].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+            time_adders[10].add_diff(unsafe { _rdtsc() } - timestamp_entry);
         }
         if b_release_connection_c {
             debug!("releasing client connection on port {}", dst_sock.1);
             cm_c.release(dst_sock.1, &mut wheel_c);
             #[cfg(feature = "profiling")]
-            time_adders[9].add_diff(utils::rdtscp_unsafe() - timestamp_entry);
+            time_adders[9].add_diff(unsafe { _rdtsc() } - timestamp_entry);
         }
         if let Some(sport) = ready_connection {
             //trace!("{} connection on port {} is ready", thread_id, sport);
             cm_c.set_ready_connection(sport, &payload_injector_ready_flag);
             #[cfg(feature = "profiling")]
-            time_adders[6].add_diff(utils::rdtsc_unsafe() - timestamp_entry);
+            time_adders[6].add_diff(unsafe { _rdtsc() } - timestamp_entry);
         }
         group_index
     };
